@@ -1,0 +1,24 @@
+The ffmpeg program included with FireWireRecorder is FFmpeg 7.1.5
+(https://ffmpeg.org) with x264 (https://www.videolan.org/developers/x264.html,
+"stable" branch, commit b35605ace3ddf7c1a5d67a2eb553f034aef41d55) linked in
+for H.264 recording. Because of x264, this ffmpeg is licensed under the GNU
+General Public License version 2 or later (see COPYING.GPLv2.txt); FFmpeg on
+its own is also available under the GNU Lesser General Public License 2.1 or
+later (see FFmpeg-COPYING.LGPLv2.1.txt). The PowerPC build for Mac OS X 10.3
+has no x264 and is LGPL.
+
+It is an unmodified FFmpeg built with only the parts the app uses:
+  configure --disable-everything --disable-autodetect --disable-network
+            --enable-protocol=file,pipe
+            --enable-demuxer=dv
+            --enable-decoder=dvvideo,pcm_s16le
+            --enable-encoder=rawvideo,pcm_s16le,pcm_s16be,mpeg2video,mp2,aac,libx264
+            --enable-muxer=rawvideo,pcm_s16le,pcm_s16be,mpeg2dvd,mp4
+            --enable-filter=yadif,scale,format,null,anull,aformat,aresample
+            --enable-gpl --enable-libx264
+The exact build script is scripts/build-ffmpeg.sh in the FireWireRecorder
+source. The source code is available at
+  https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+  https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264.tar.bz2
+You may replace this ffmpeg with any other build: put it next to
+FireWireRecorder, or set FWDV_FFMPEG to its path.

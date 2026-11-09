@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install nasm
+      - run: make VERSION=$(case $GITHUB_REF in (refs/tags/v*) echo ${GITHUB_REF_NAME#v} ;; (*) echo 0.0.0-dev ;; esac)
+      - name: Check Universal 2 and macOS 10.9
+        run: |
+          for f in "build/FireWireRecorder.app/Contents/MacOS/FireWireRecorder" \
+                   "build/FireWireRecorder.app/Contents/MacOS/ffmpeg" build/fwdv-capture build/ffmpeg; do
+            lipo "$f" -verify_arch x86_64 && lipo "$f" -verify_arch arm64
+            ! otool -L "$f" | grep -q -e '@rpath/' -e libswift
+          done
+          # the Intel slice must still load on 10.9 (the Apple silicon slice is 11.0 by definition)
+          for f in "build/FireWireRecorder.app/Contents/MacOS/FireWireRecorder" build/fwdv-capture; do
+            otool -arch x86_64 -l "$f" | grep -A2 LC_VERSION_MIN_MACOSX | grep -q 'version 10.9'
+          done
+          codesign -v --strict "build/FireWireRecorder.app"
+      - name: Package
+        run: |
+          mkdir -p out/stage
+          cp -R "build/FireWireRecorder.app" build/fwdv-capture build/ffmpeg resources/licenses README.md out/stage/
+          ditto -c -k --keepParent "build/FireWireRecorder.app" out/FireWireRecorder-macos-universal-app.zip
+          tar -C out/stage -czf out/FireWireRecorder-macos-universal.tar.gz .
+          rm -rf out/stage
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: out/* }
+
+  macos-legacy:
+    # Mac OS X 10.3-10.8 on PowerPC and Intel, cross-built with GCC 14 for PowerPC and cctools' ld64
+    runs-on: ubuntu-latest
+    container: ghcr.io/variantxyz/gcc-powerpc-apple-darwin8:build-gcc-14.2-MacOSXSDK10.4u
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y clang git nasm pkgconf curl xz-utils zip
+      - run: VERSION=$(case $GITHUB_REF in (refs/tags/v*) echo ${GITHUB_REF_NAME#v} ;; (*) echo 0.0.0-dev ;; esac) scripts/build-legacy-mac.sh
+      - name: Check PowerPC and i386
+        run: |
+          T=powerpc-apple-darwin8
+          for f in "build/legacy/out/FireWireRecorder Legacy.app/Contents/MacOS/FireWireRecorder" build/legacy/out/fwdv-capture build/legacy/out/ffmpeg; do
+            # ffmpeg's PowerPC slice is marked ppc750 (G3 and later), so not "ppc" exactly
+            case $($T-lipo -info "$f") in *ppc*i386*) ;; *) echo "$f is not PowerPC + i386" >&2; exit 1 ;; esac
+            $T-otool -arch ppc -l "$f" | grep -A2 LC_VERSION_MIN_MACOSX | grep -q 'version 10.3'
+          done
+      - name: Package
+        run: |
+          mkdir -p out/stage
+          cd build/legacy/out
+          zip -qry "$GITHUB_WORKSPACE/out/FireWireRecorder-macos-legacy-ppc-i386-app.zip" "FireWireRecorder Legacy.app"
+          cp -R "FireWireRecorder Legacy.app" fwdv-capture ffmpeg "$GITHUB_WORKSPACE/out/stage/"
+          cp -R "$GITHUB_WORKSPACE/resources/licenses" "$GITHUB_WORKSPACE/out/stage/"
+          tar -C "$GITHUB_WORKSPACE/out/stage" -czf "$GITHUB_WORKSPACE/out/FireWireRecorder-macos-legacy-ppc-i386.tar.gz" .
+          rm -rf "$GITHUB_WORKSPACE/out/stage"
+      - uses: actions/upload-artifact@v4
+        with: { name: macos-legacy, path: out/* }
+
+  windows:
+    runs-on: ubuntu-latest
+    env:
+      LLVM_MINGW: llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64
+      LLVM_MINGW_SHA256: 6e3342e2e0dfa56e9178f3c34b198f278bd5e603db4a759455d1439cc2230630
+      # msvcrt-based toolchain, so the x86/x86_64 builds start on Windows 7
+      WIN_CC_x86_64: x86_64-w64-mingw32-clang
+      WIN_CC_x86: i686-w64-mingw32-clang
+      WIN_CC_aarch64: aarch64-w64-mingw32-clang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - run: sudo apt-get update && sudo apt-get install -y nasm nsis p7zip-full
+      - name: llvm-mingw (msvcrt)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/lm.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$LLVM_MINGW.tar.xz"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/lm.tar.xz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP" -xJf "$RUNNER_TEMP/lm.tar.xz"
+          echo "$RUNNER_TEMP/$LLVM_MINGW/bin" >> "$GITHUB_PATH"
+      - run: scripts/build-all.sh x86_64-windows-gnu x86-windows-gnu aarch64-windows-gnu
+      - name: Check Windows 7 compatibility (no Universal CRT)
+        run: |
+          bad=0
+          for f in dist/x86_64-windows-gnu/*.exe dist/x86-windows-gnu/*.exe; do
+            dlls=$(llvm-objdump -p "$f" | sed -n 's/.*DLL Name: //p' | sort -u | tr '\n' ' ')
+            echo "$f: $dlls"
+            case $dlls in *api-ms-win-crt*|*ucrtbase*) echo "::error::$f needs the Universal CRT"; bad=1 ;; esac
+          done
+          exit $bad
+      - name: Package
+        run: |
+          mkdir out
+          v=${GITHUB_REF_NAME#v}; case $GITHUB_REF in refs/tags/*) ;; *) v=0.0.0-dev ;; esac
+          for a in x86_64 x86 aarch64; do
+            n=$a-windows-gnu
+            cp README.md "dist/$n/"
+            (cd dist && zip -qr "../out/FireWireRecorder-$n.zip" "$n")
+            makensis -V2 -DARCH=$a -DVERSION=$v -DSRC="$PWD/dist/$n" \
+              -DOUTFILE="$PWD/out/FireWireRecorder-$a-windows-setup.exe" installer/windows.nsi
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: out/* }
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.17.0 }
+      - run: scripts/build-all.sh x86_64-linux-gnu.2.31 x86-linux-gnu.2.31 aarch64-linux-gnu.2.31 arm-linux-gnueabihf.2.31 x86_64-linux-musl aarch64-linux-musl
+      - name: Package
+        run: |
+          mkdir out
+          for d in dist/*; do
+            n=$(basename "$d")
+            cp README.md "$d/"
+            tar -C dist -czf "out/FireWireRecorder-$n.tar.gz" "$n"
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: out/* }
+
+  release:
+    needs: [macos, macos-legacy, windows, linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Publish
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" \
+            --title "FireWireRecorder $GITHUB_REF_NAME" --generate-notes
