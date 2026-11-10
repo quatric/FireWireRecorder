@@ -92,6 +92,7 @@ struct app {
 
     pthread_mutex_t data_lock; /* the consumers of the stream */
     decoder_t *vdec, *adec;
+    volatile int stop_after; /* minutes, 0 = no limit */
     volatile int preview;
     int dec_pal;               /* the format the decoders were started for */
     int64_t last_frame_ms;
@@ -1131,6 +1132,20 @@ uint64_t app_record_bytes(app_t *a)
 void app_set_auto_stop(app_t *a, int on) { a->auto_stop = on != 0; }
 
 int app_auto_stop_due(app_t *a) { return a->auto_stop_due; }
+
+const int app_stop_after_minutes[APP_STOP_AFTERS] = { 0, 5, 10, 15, 30, 60, 90, 120, 180 };
+const char *const app_stop_after_names[APP_STOP_AFTERS] = { "No limit", "5 min", "10 min", "15 min", "30 min",
+                                                            "1 hour", "1.5 hours", "2 hours", "3 hours" };
+
+void app_set_stop_after(app_t *a, int index)
+{
+    a->stop_after = index >= 0 && index < APP_STOP_AFTERS ? app_stop_after_minutes[index] : 0;
+}
+
+int app_stop_after_due(app_t *a)
+{
+    return a->stop_after > 0 && app_is_recording(a) && app_record_seconds(a) >= a->stop_after * 60.0;
+}
 
 
 /* ---- snapshot: minimal PNG writer (stored deflate blocks) ---- */

@@ -80,6 +80,13 @@ uint64_t app_record_bytes(app_t *a); /* written to the file so far */
  * tape stops or the picture ends during a recording; the GUI then stops it. */
 void app_set_auto_stop(app_t *a, int on);
 int app_auto_stop_due(app_t *a);
+/* "Stop after": the choices (minutes; 0 = no limit) and their names, shared by every GUI. The GUI polls
+ * app_stop_after_due() and stops the recording itself when it returns 1. */
+#define APP_STOP_AFTERS 9
+extern const int app_stop_after_minutes[APP_STOP_AFTERS];
+extern const char *const app_stop_after_names[APP_STOP_AFTERS];
+void app_set_stop_after(app_t *a, int index);
+int app_stop_after_due(app_t *a);
 
 /* Saves the current picture as a square-pixel PNG (needs the preview on). */
 int app_snapshot(app_t *a, const char *folder, char *path, int pathlen, char *err, int errlen);

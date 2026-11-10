@@ -244,6 +244,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     NSButton *_tape[TAPE_BUTTONS];
     NSTextField *_timecode, *_tapeState;
     NSPopUpButton *_format;
+    NSPopUpButton *_stopAfter;
     NSButton *_autoStop, *_previewCheck, *_monitor, *_record, *_folderButton;
     NSTextField *_time, *_status;
     MeterView *_meters;
@@ -360,7 +361,7 @@ static void rec_done(void *user, int ok, const char *path);
     NSArray *row2 = [NSArray arrayWithObjects:[self label:@"Format"], _format, [NSNumber numberWithFloat:8], _autoStop,
                                               [NSNumber numberWithFloat:8], _previewCheck, [NSNumber numberWithFloat:8],
                                               [self label:@"Save to"], _folderButton, nil];
-    NSArray *row3 = [NSArray arrayWithObjects:_record, _time, _meters, _monitor, nil];
+    NSArray *row3 = [NSArray arrayWithObjects:_record, _time, _meters, _monitor, [self label:@"Stop after"], _stopAfter, nil];
     unsigned i;
     for (i = 0; i < [row2 count]; i++) {
         id v = [row2 objectAtIndex:i];
@@ -374,6 +375,8 @@ static void rec_done(void *user, int ok, const char *path);
     fit(_record, 100, 0);
     fit(_time, 0, 0);
     fit(_monitor, 0, 0);
+    fit([self label:@"Stop after"], 0, 0);
+    fit(_stopAfter, 0, 0);
     float x = place_row(row1, 12, 78, 26, 4);
     NSRect tf = [_tapeState frame];
     tf.origin.x = x + 6;
@@ -462,7 +465,7 @@ static void rec_done(void *user, int ok, const char *path);
 {
     NSUserDefaults *ud = [self ud];
     int barH = 112;
-    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 600 + barH)
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, [[NSScreen mainScreen] visibleFrame].size.height - 60 < 600 + barH ? [[NSScreen mainScreen] visibleFrame].size.height - 60 : 600 + barH)
                                           styleMask:NSTitledWindowMask | NSClosableWindowMask |
                                                     NSMiniaturizableWindowMask | NSResizableWindowMask
                                             backing:NSBackingStoreBuffered
@@ -495,6 +498,10 @@ static void rec_done(void *user, int ok, const char *path);
     [_tapeState setTextColor:[NSColor disabledControlTextColor]];
     [_tapeState setAutoresizingMask:NSViewWidthSizable];
 
+    _stopAfter = make_popup(app_stop_after_names, APP_STOP_AFTERS, self, @selector(stopAfterChanged:));
+    [_stopAfter selectItemAtIndex:[ud integerForKey:@"stopAfter"] >= 0 && [ud integerForKey:@"stopAfter"] < APP_STOP_AFTERS ? [ud integerForKey:@"stopAfter"] : 0];
+    [_stopAfter setToolTip:@"Stop the recording by itself after this long."];
+    app_set_stop_after(g_app, (int)[_stopAfter indexOfSelectedItem]);
     _format = make_popup(app_format_names, FORMATS, self, @selector(formatChanged:));
     [_format selectItemAtIndex:[ud integerForKey:@"format"] < FORMATS ? [ud integerForKey:@"format"] : 0];
     [_format setToolTip:@"Raw DV keeps the tape exactly (about 13 GB an hour). MPEG-2 makes DVD-ready .mpg files."];
@@ -519,7 +526,7 @@ static void rec_done(void *user, int ok, const char *path);
     [_status setAutoresizingMask:NSViewWidthSizable];
 
     NSArray *all = [NSArray arrayWithObjects:_timecode, _tapeState, _format, _autoStop, _previewCheck, _folderButton,
-                                             _record, _time, _meters, _monitor, _status, nil];
+                                             _record, _time, _meters, _monitor, _stopAfter, _status, nil];
     unsigned k;
     for (k = 0; k < [all count]; k++)
         [_bar addSubview:[all objectAtIndex:k]];
@@ -613,6 +620,13 @@ static void rec_done(void *user, int ok, const char *path);
     BOOL on = [_autoStop state] == NSOnState;
     app_set_auto_stop(g_app, on);
     [[self ud] setBool:on forKey:@"autoStop"];
+}
+
+- (void)stopAfterChanged:(id)sender
+{
+    (void)sender;
+    app_set_stop_after(g_app, (int)[_stopAfter indexOfSelectedItem]);
+    [[self ud] setInteger:[_stopAfter indexOfSelectedItem] forKey:@"stopAfter"];
 }
 
 - (void)previewChanged:(id)sender
@@ -807,8 +821,8 @@ static void rec_done(void *user, int ok, const char *path)
     if (![[_tapeState stringValue] isEqualToString:mode])
         [_tapeState setStringValue:mode];
 
-    if (rec && !_finishing && app_auto_stop_due(g_app))
-        [self stopRecording]; /* "Stop at end of tape" */
+    if (rec && !_finishing && (app_auto_stop_due(g_app) || app_stop_after_due(g_app)))
+        [self stopRecording]; /* "Stop at end of tape" or "Stop after" */
 
     char status[600], name[128];
     app_status(g_app, status, sizeof(status));

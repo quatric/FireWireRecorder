@@ -464,7 +464,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
 
     NSButton *_tape[TAPE_BUTTONS];
     NSTextField *_timecodeLabel, *_tapeLabel;
-    NSPopUpButton *_formatPopup;
+    NSPopUpButton *_formatPopup, *_stopAfterPopup;
     NSButton *_autoStopCheck, *_previewCheck, *_monitorCheck, *_recordButton, *_folderButton;
     Box *_bar;
     NSTextField *_timeLabel, *_statusLabel;
@@ -495,6 +495,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     g_app = app_start();
     app_set_monitor(g_app, [ud boolForKey:@"monitor"]);
     app_set_preview(g_app, [ud boolForKey:@"preview"]);
+    app_set_stop_after(g_app, (int)_stopAfterPopup.indexOfSelectedItem);
     app_set_auto_stop(g_app, [ud boolForKey:@"autoStop"]);
     [self startAudio];
     [self tick];
@@ -562,7 +563,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
 {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     _window = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 800, 600 + 120)
+        initWithContentRect:NSMakeRect(0, 0, 800, MIN(600 + 120, NSScreen.mainScreen.visibleFrame.size.height - 60))
                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                             NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable
                     backing:NSBackingStoreBuffered
@@ -651,7 +652,12 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     _statusLabel.textColor = label_color(YES);
     [_statusLabel.cell setLineBreakMode:NSLineBreakByTruncatingMiddle];
 
-    Box *row3 = stack(@[ _recordButton, _timeLabel, meters, _monitorCheck, _statusLabel ]);
+    _stopAfterPopup = make_popup(app_stop_after_names, APP_STOP_AFTERS, self, @selector(stopAfterChanged:));
+    [_stopAfterPopup selectItemAtIndex:MAX(0, MIN(APP_STOP_AFTERS - 1, [ud integerForKey:@"stopAfter"]))];
+    _stopAfterPopup.toolTip = @"Stop the recording by itself after this long.";
+
+    Box *row3 = stack(@[ _recordButton, _timeLabel, meters, _monitorCheck, [self label:@"Stop after"], _stopAfterPopup,
+                         _statusLabel ]);
     row3.flexible = _statusLabel;
     row3.spacing = 16;
 
@@ -803,6 +809,12 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     BOOL on = _autoStopCheck.state == NSControlStateValueOn;
     [NSUserDefaults.standardUserDefaults setBool:on forKey:@"autoStop"];
     app_set_auto_stop(g_app, on);
+}
+
+- (void)stopAfterChanged:(id)sender
+{
+    [NSUserDefaults.standardUserDefaults setInteger:_stopAfterPopup.indexOfSelectedItem forKey:@"stopAfter"];
+    app_set_stop_after(g_app, (int)_stopAfterPopup.indexOfSelectedItem);
 }
 
 - (void)previewChanged:(id)sender
@@ -1045,6 +1057,8 @@ static CVReturn display_link_cb(CVDisplayLinkRef link, const CVTimeStamp *now, c
 
     if (rec && !_finishing && app_auto_stop_due(g_app))
         [self stopRecording]; /* "Stop at end of tape" */
+    else if (rec && !_finishing && app_stop_after_due(g_app))
+        [self stopRecording]; /* "Stop after" */
 
     char status[600];
     app_status(g_app, status, sizeof(status));

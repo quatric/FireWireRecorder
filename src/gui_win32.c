@@ -28,14 +28,14 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
 enum {
     ID_TAPE = 100, /* ID_TAPE + TAPE_* */
     ID_TIMECODE = 110, ID_TAPESTATE, ID_FORMAT, ID_AUTOSTOP, ID_PREVIEW, ID_FOLDER, ID_RECORD, ID_MONITOR, ID_TIME,
-    ID_STATUS, ID_METER_L, ID_METER_R, ID_LBL_FORMAT, ID_LBL_SAVE, ID_LBL_L, ID_LBL_R,
+    ID_STATUS, ID_METER_L, ID_METER_R, ID_LBL_FORMAT, ID_LBL_SAVE, ID_LBL_L, ID_LBL_R, ID_LBL_STOP, ID_STOPAFTER,
     IDM_RECORD = 200, IDM_SNAPSHOT, IDM_CHOOSE_FOLDER, IDM_OPEN_FOLDER, IDM_EXIT, IDM_FULLSCREEN, IDM_ESCAPE,
     IDM_PREVIEW,
     IDM_TAPE = 220, /* IDM_TAPE + TAPE_* */
     TIMER_FRAME = 1, TIMER_UI = 2,
     WM_APP_RECDONE = WM_APP + 1,
 };
-#define NLABELS 4
+#define NLABELS 5
 
 static struct {
     HINSTANCE inst;
@@ -43,6 +43,7 @@ static struct {
     HWND tape[TAPE_BUTTONS], timecode, tape_state, format, autostop, previewchk;
     HWND folder_btn, record, monitor, time, status, meter[2];
     HWND labels[NLABELS];
+    HWND stopafter;
     HFONT font, time_font, badge_font, msg_font;
     HBRUSH bar_brush;
     HMENU menu;
@@ -257,6 +258,10 @@ static void layout(void)
     x += S(14 + 100 + 16);
     MoveWindow(G.monitor, x, y3 + S(4), S(100), lh, TRUE);
     x += S(100 + 12);
+    MoveWindow(G.labels[4], x, y3 + S(6), S(62), lh, TRUE);
+    x += S(62 + 4);
+    MoveWindow(G.stopafter, x, y3 + S(2), S(100), S(200), TRUE);
+    x += S(100 + 12);
     MoveWindow(G.status, x, y3 + S(6), c.right - x - S(12), lh, TRUE);
 }
 
@@ -306,6 +311,13 @@ static void build_controls(void)
     G.labels[3] = make(L"STATIC", L"R", 0, ID_LBL_R);
     G.meter[1] = make(L"STATIC", L"", SS_OWNERDRAW, ID_METER_R);
     G.monitor = make(L"BUTTON", L"Play audio", BS_AUTOCHECKBOX | WS_TABSTOP, ID_MONITOR);
+    G.labels[4] = make(L"STATIC", L"Stop after", 0, ID_LBL_STOP);
+    G.stopafter = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, ID_STOPAFTER);
+    for (int i = 0; i < APP_STOP_AFTERS; i++) {
+        wchar_t wn[32];
+        MultiByteToWideChar(CP_UTF8, 0, app_stop_after_names[i], -1, wn, 32);
+        SendMessageW(G.stopafter, CB_ADDSTRING, 0, (LPARAM)wn);
+    }
     G.status = make(L"STATIC", L"", SS_ENDELLIPSIS | SS_NOPREFIX, ID_STATUS);
 }
 
@@ -487,7 +499,7 @@ static void toggle_fullscreen(void)
     DWORD style = (DWORD)GetWindowLongW(G.wnd, GWL_STYLE);
     HWND bar[] = { G.tape[0], G.tape[1], G.tape[2], G.tape[3], G.tape[4], G.timecode, G.tape_state, G.format,
                    G.autostop, G.previewchk, G.folder_btn, G.record, G.monitor, G.time, G.status, G.meter[0],
-                   G.meter[1], G.labels[0], G.labels[1], G.labels[2], G.labels[3] };
+                   G.meter[1], G.labels[0], G.labels[1], G.labels[2], G.labels[3], G.labels[4], G.stopafter };
     G.fullscreen = !G.fullscreen;
     for (size_t i = 0; i < sizeof(bar) / sizeof(bar[0]); i++)
         ShowWindow(bar[i], G.fullscreen ? SW_HIDE : SW_SHOW);
@@ -541,8 +553,8 @@ static void tick_ui(void)
     }
     set_text(G.timecode, tc);
     set_text(G.tape_state, mode);
-    if (rec && !G.finishing && app_auto_stop_due(G.app))
-        stop_recording(); /* "Stop at end of tape" */
+    if (rec && !G.finishing && (app_auto_stop_due(G.app) || app_stop_after_due(G.app)))
+        stop_recording(); /* "Stop at end of tape" or "Stop after" */
 
     char status[700], t[64];
     app_status(G.app, status, sizeof(status));
@@ -636,6 +648,13 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDM_PREVIEW:
             set_preview(!app_preview(G.app));
+            return 0;
+        case ID_STOPAFTER:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int i = (int)SendMessageW(G.stopafter, CB_GETCURSEL, 0, 0);
+                app_set_stop_after(G.app, i);
+                app_set_setting_int("stop_after", i);
+            }
             return 0;
         case ID_MONITOR: {
             int on = checked(G.monitor);
@@ -764,6 +783,16 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
 
     RECT r = { 0, 0, S(800), S(600 + BAR_H) };
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, TRUE);
+    {
+        /* short screens: stay inside the work area, clear of the taskbar */
+        RECT wa;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+            if (r.bottom - r.top > wa.bottom - wa.top)
+                r.bottom = r.top + (wa.bottom - wa.top);
+            if (r.right - r.left > wa.right - wa.left)
+                r.right = r.left + (wa.right - wa.left);
+        }
+    }
     G.wnd = CreateWindowExW(0, L"FireWireRecorder", L"FireWireRecorder", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, inst,
                             NULL);
@@ -781,6 +810,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     if (!G.app) {
         MessageBoxW(NULL, L"Out of memory", L"FireWireRecorder", MB_ICONERROR);
         return 1;
+    }
+    {
+        int sa = app_setting_int("stop_after", 0);
+        sa = sa < 0 || sa >= APP_STOP_AFTERS ? 0 : sa;
+        SendMessageW(G.stopafter, CB_SETCURSEL, sa, 0);
+        app_set_stop_after(G.app, sa);
     }
     app_set_monitor(G.app, monitor);
     app_set_auto_stop(G.app, autostop);

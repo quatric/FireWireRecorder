@@ -13,6 +13,7 @@ The tape's timecode and state (playing, paused, rewinding, no tape) are shown ne
 transport buttons. "Stop at end of tape" ends the recording by itself once the tape stops or the
 picture goes away. The preview can be switched off (View → Show Preview, or the Preview checkbox)
 to save CPU on slow machines while recording.
+"Stop after" ends a recording by itself after 5 minutes up to 3 hours (default: no limit).
 
 Status: tested on macOS 10.9.5 (Intel) with a Sony DCR-HC21 (NTSC): live preview, tape control,
 timecode, and recording in all three formats; the PowerPC/i386 legacy build's capture was tested on
