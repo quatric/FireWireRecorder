@@ -244,7 +244,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     NSButton *_tape[TAPE_BUTTONS];
     NSTextField *_timecode, *_tapeState;
     NSPopUpButton *_format;
-    NSPopUpButton *_stopAfter;
+    NSComboBox *_stopAfter;
     NSButton *_autoStop, *_previewCheck, *_monitor, *_record, *_folderButton;
     NSTextField *_time, *_status;
     MeterView *_meters;
@@ -376,7 +376,11 @@ static void rec_done(void *user, int ok, const char *path);
     fit(_time, 0, 0);
     fit(_monitor, 0, 0);
     fit([self label:@"Stop after"], 0, 0);
-    fit(_stopAfter, 0, 0);
+    {
+        NSRect sf2 = [_stopAfter frame];
+        sf2.size.width = 120;
+        [_stopAfter setFrame:sf2];
+    }
     float x = place_row(row1, 12, 78, 26, 4);
     NSRect tf = [_tapeState frame];
     tf.origin.x = x + 6;
@@ -498,10 +502,25 @@ static void rec_done(void *user, int ok, const char *path);
     [_tapeState setTextColor:[NSColor disabledControlTextColor]];
     [_tapeState setAutoresizingMask:NSViewWidthSizable];
 
-    _stopAfter = make_popup(app_stop_after_names, APP_STOP_AFTERS, self, @selector(stopAfterChanged:));
-    [_stopAfter selectItemAtIndex:[ud integerForKey:@"stopAfter"] >= 0 && [ud integerForKey:@"stopAfter"] < APP_STOP_AFTERS ? [ud integerForKey:@"stopAfter"] : 0];
-    [_stopAfter setToolTip:@"Stop the recording by itself after this long."];
-    app_set_stop_after(g_app, (int)[_stopAfter indexOfSelectedItem]);
+    _stopAfter = [[[NSComboBox alloc] initWithFrame:NSMakeRect(0, 0, 120, 22)] autorelease];
+    [_stopAfter setFont:[NSFont systemFontOfSize:[NSFont systemFontSize]]];
+    {
+        int k, saved;
+        char lb[48];
+        for (k = 0; k < APP_STOP_AFTERS; k++)
+            [_stopAfter addItemWithObjectValue:[NSString stringWithUTF8String:app_stop_after_names[k]]];
+        [_stopAfter setTarget:self];
+        [_stopAfter setAction:@selector(stopAfterChanged:)];
+        [_stopAfter setDelegate:self]; /* typing a time and leaving the box counts too */
+        saved = [ud objectForKey:@"stopAfterMinutes"] ? (int)[ud integerForKey:@"stopAfterMinutes"]
+                                                      : app_stop_after_from_index((int)[ud integerForKey:@"stopAfter"]);
+        if (saved < 0 || saved > APP_STOP_AFTER_MAX)
+            saved = 0;
+        app_stop_after_label(saved, lb, sizeof(lb));
+        [_stopAfter setStringValue:[NSString stringWithUTF8String:lb]];
+        app_set_stop_after_minutes(g_app, saved);
+    }
+    [_stopAfter setToolTip:@"Stop the recording by itself after this long.\nPick a time, or type your own: 45, 2h, 1:30..."];
     _format = make_popup(app_format_names, FORMATS, self, @selector(formatChanged:));
     [_format selectItemAtIndex:[ud integerForKey:@"format"] < FORMATS ? [ud integerForKey:@"format"] : 0];
     [_format setToolTip:@"Raw DV keeps the tape exactly (about 13 GB an hour). MPEG-2 makes DVD-ready .mpg files."];
@@ -624,9 +643,21 @@ static void rec_done(void *user, int ok, const char *path);
 
 - (void)stopAfterChanged:(id)sender
 {
+    int mins = app_parse_stop_after([[_stopAfter stringValue] UTF8String]);
+    char lb[48];
     (void)sender;
-    app_set_stop_after(g_app, (int)[_stopAfter indexOfSelectedItem]);
-    [[self ud] setInteger:[_stopAfter indexOfSelectedItem] forKey:@"stopAfter"];
+    if (mins < 0)
+        mins = (int)[[self ud] integerForKey:@"stopAfterMinutes"]; /* not a time: keep the last one */
+    app_stop_after_label(mins, lb, sizeof(lb));
+    [_stopAfter setStringValue:[NSString stringWithUTF8String:lb]];
+    app_set_stop_after_minutes(g_app, mins);
+    [[self ud] setInteger:mins forKey:@"stopAfterMinutes"];
+}
+
+- (void)controlTextDidEndEditing:(NSNotification *)n
+{
+    if ([n object] == _stopAfter)
+        [self stopAfterChanged:_stopAfter];
 }
 
 - (void)previewChanged:(id)sender

@@ -10,6 +10,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -1140,6 +1141,92 @@ const char *const app_stop_after_names[APP_STOP_AFTERS] = { "No limit", "5 min",
 void app_set_stop_after(app_t *a, int index)
 {
     a->stop_after = index >= 0 && index < APP_STOP_AFTERS ? app_stop_after_minutes[index] : 0;
+}
+
+void app_set_stop_after_minutes(app_t *a, int minutes)
+{
+    a->stop_after = minutes < 0 ? 0 : minutes > APP_STOP_AFTER_MAX ? APP_STOP_AFTER_MAX : minutes;
+}
+
+int app_stop_after_from_index(int index)
+{
+    return index >= 0 && index < APP_STOP_AFTERS ? app_stop_after_minutes[index] : 0;
+}
+
+int app_parse_stop_after(const char *text)
+{
+    char buf[64];
+    size_t n = 0;
+    for (; text && *text && n < sizeof(buf) - 1; text++)
+        if (*text != ' ' && *text != '\t')
+            buf[n++] = (char)(*text >= 'A' && *text <= 'Z' ? *text + 32 : *text);
+    buf[n] = 0;
+    if (!n)
+        return -1;
+    if (!strcmp(buf, "nolimit") || !strcmp(buf, "none") || !strcmp(buf, "off"))
+        return 0;
+    char *end;
+    double v = strtod(buf, &end);
+    if (end == buf || v < 0)
+        return -1;
+    double minutes;
+    if (*end == ':') { /* h:mm */
+        char *end2;
+        long m = strtol(end + 1, &end2, 10);
+        if (end2 == end + 1 || m < 0 || m > 59 || *end2)
+            return -1;
+        minutes = (long)v * 60.0 + (double)m;
+    } else {
+        const char *rest = end;
+        while (*rest >= 'a' && *rest <= 'z')
+            rest++;
+        size_t ul = (size_t)(rest - end);
+        char unit[16];
+        if (ul >= sizeof(unit))
+            return -1;
+        memcpy(unit, end, ul);
+        unit[ul] = 0;
+        if (!*unit || !strcmp(unit, "m") || !strcmp(unit, "min") || !strcmp(unit, "mins") || !strcmp(unit, "minute") ||
+            !strcmp(unit, "minutes")) {
+            minutes = v;
+            if (*rest)
+                return -1;
+        } else if (!strcmp(unit, "h") || !strcmp(unit, "hr") || !strcmp(unit, "hrs") || !strcmp(unit, "hour") ||
+                   !strcmp(unit, "hours")) {
+            minutes = v * 60.0;
+            if (*rest) { /* "2h15", "2h15min" */
+                char *end2;
+                long m = strtol(rest, &end2, 10);
+                if (end2 == rest || m < 0 || m > 59)
+                    return -1;
+                if (strcmp(end2, "") && strcmp(end2, "m") && strcmp(end2, "min") && strcmp(end2, "mins"))
+                    return -1;
+                minutes += (double)m;
+            }
+        } else {
+            return -1;
+        }
+    }
+    minutes += 0.5;
+    if (minutes > APP_STOP_AFTER_MAX)
+        return APP_STOP_AFTER_MAX;
+    return (int)minutes;
+}
+
+void app_stop_after_label(int minutes, char *buf, int buflen)
+{
+    int i;
+    for (i = 0; i < APP_STOP_AFTERS; i++)
+        if (app_stop_after_minutes[i] == minutes) {
+            snprintf(buf, (size_t)buflen, "%s", app_stop_after_names[i]);
+            return;
+        }
+    if (minutes < 60)
+        snprintf(buf, (size_t)buflen, "%d min", minutes);
+    else if (minutes % 60 == 0)
+        snprintf(buf, (size_t)buflen, "%d h", minutes / 60);
+    else
+        snprintf(buf, (size_t)buflen, "%d h %d min", minutes / 60, minutes % 60);
 }
 
 int app_stop_after_due(app_t *a)

@@ -260,8 +260,8 @@ static void layout(void)
     x += S(100 + 12);
     MoveWindow(G.labels[4], x, y3 + S(6), S(62), lh, TRUE);
     x += S(62 + 4);
-    MoveWindow(G.stopafter, x, y3 + S(2), S(100), S(200), TRUE);
-    x += S(100 + 12);
+    MoveWindow(G.stopafter, x, y3 + S(2), S(116), S(200), TRUE);
+    x += S(116 + 12);
     MoveWindow(G.status, x, y3 + S(6), c.right - x - S(12), lh, TRUE);
 }
 
@@ -312,7 +312,7 @@ static void build_controls(void)
     G.meter[1] = make(L"STATIC", L"", SS_OWNERDRAW, ID_METER_R);
     G.monitor = make(L"BUTTON", L"Play audio", BS_AUTOCHECKBOX | WS_TABSTOP, ID_MONITOR);
     G.labels[4] = make(L"STATIC", L"Stop after", 0, ID_LBL_STOP);
-    G.stopafter = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, ID_STOPAFTER);
+    G.stopafter = make(L"COMBOBOX", L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_TABSTOP, ID_STOPAFTER);
     for (int i = 0; i < APP_STOP_AFTERS; i++) {
         wchar_t wn[32];
         MultiByteToWideChar(CP_UTF8, 0, app_stop_after_names[i], -1, wn, 32);
@@ -591,6 +591,29 @@ static void tick_ui(void)
 
 /* ---- main window ---- */
 
+/* "Stop after": a preset or a time typed into the box (45, 2h, 1:30...), in minutes. */
+static void stop_after_set(int mins, int show)
+{
+    app_set_stop_after_minutes(G.app, mins);
+    app_set_setting_int("stop_after_min", mins);
+    if (show) {
+        char lb[48];
+        wchar_t wl[48];
+        app_stop_after_label(mins, lb, sizeof(lb));
+        MultiByteToWideChar(CP_UTF8, 0, lb, -1, wl, 48);
+        SetWindowTextW(G.stopafter, wl);
+    }
+}
+
+static int stop_after_typed(void)
+{
+    wchar_t w[64];
+    char u[128];
+    GetWindowTextW(G.stopafter, w, 64);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), NULL, NULL);
+    return app_parse_stop_after(u);
+}
+
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -650,10 +673,20 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             set_preview(!app_preview(G.app));
             return 0;
         case ID_STOPAFTER:
-            if (HIWORD(wp) == CBN_SELCHANGE) {
+            if (HIWORD(wp) == CBN_SELCHANGE) { /* a preset */
                 int i = (int)SendMessageW(G.stopafter, CB_GETCURSEL, 0, 0);
-                app_set_stop_after(G.app, i);
-                app_set_setting_int("stop_after", i);
+                if (i >= 0 && i < APP_STOP_AFTERS)
+                    stop_after_set(app_stop_after_minutes[i], 0);
+            } else if (HIWORD(wp) == CBN_EDITCHANGE) { /* typing a time: counts as soon as it reads as one */
+                int mins = stop_after_typed();
+                if (mins >= 0)
+                    stop_after_set(mins, 0);
+            } else if (HIWORD(wp) == CBN_KILLFOCUS) { /* done typing: tidy the text */
+                int mins = stop_after_typed();
+                if (mins >= 0)
+                    stop_after_set(mins, 1);
+                else
+                    stop_after_set(app_setting_int("stop_after_min", 0), 1);
             }
             return 0;
         case ID_MONITOR: {
@@ -812,10 +845,10 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
         return 1;
     }
     {
-        int sa = app_setting_int("stop_after", 0);
-        sa = sa < 0 || sa >= APP_STOP_AFTERS ? 0 : sa;
-        SendMessageW(G.stopafter, CB_SETCURSEL, sa, 0);
-        app_set_stop_after(G.app, sa);
+        int mins = app_setting_int("stop_after_min", -1);
+        if (mins < 0) /* an older version saved the position of a preset */
+            mins = app_stop_after_from_index(app_setting_int("stop_after", 0));
+        stop_after_set(mins, 1);
     }
     app_set_monitor(G.app, monitor);
     app_set_auto_stop(G.app, autostop);

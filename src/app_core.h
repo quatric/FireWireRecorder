@@ -87,6 +87,17 @@ extern const int app_stop_after_minutes[APP_STOP_AFTERS];
 extern const char *const app_stop_after_names[APP_STOP_AFTERS];
 void app_set_stop_after(app_t *a, int index);
 int app_stop_after_due(app_t *a);
+/* A custom time: any number of minutes (0 = no limit), up to APP_STOP_AFTER_MAX. */
+#define APP_STOP_AFTER_MAX 5999
+void app_set_stop_after_minutes(app_t *a, int minutes);
+/* Reads what a person typed: "45", "45 min", "90m", "2h", "1.5 hours", "1:30" or "no limit". Returns the
+ * minutes (0 = no limit) or -1 if the text is not a time. */
+int app_parse_stop_after(const char *text);
+/* "No limit", "5 min", "1 hour", "2 h 15 min"... for any number of minutes. */
+void app_stop_after_label(int minutes, char *buf, int buflen);
+/* The saved choice: the minutes (0 = no limit). `old_index` is what older versions stored (a preset's
+ * position), or -1. */
+int app_stop_after_from_index(int index);
 
 /* Saves the current picture as a square-pixel PNG (needs the preview on). */
 int app_snapshot(app_t *a, const char *folder, char *path, int pathlen, char *err, int errlen);
