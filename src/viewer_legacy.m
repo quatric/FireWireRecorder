@@ -650,7 +650,8 @@ static void rec_done(void *user, int ok, const char *path);
         mins = (int)[[self ud] integerForKey:@"stopAfterMinutes"]; /* not a time: keep the last one */
     app_stop_after_label(mins, lb, sizeof(lb));
     [_stopAfter setStringValue:[NSString stringWithUTF8String:lb]];
-    app_set_stop_after_minutes(g_app, mins);
+    if (g_app) /* the box can end editing while the app quits */
+        app_set_stop_after_minutes(g_app, mins);
     [[self ud] setInteger:mins forKey:@"stopAfterMinutes"];
 }
 

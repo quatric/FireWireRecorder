@@ -659,7 +659,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     _stopAfterPopup.target = self;
     _stopAfterPopup.action = @selector(stopAfterChanged:);
     _stopAfterPopup.delegate = (id)self; /* typing a time and leaving the box counts too */
-    limit_size(_stopAfterPopup, 120, 0, 0);
+    limit_size(_stopAfterPopup, 120, 0, 24); /* a combo box has no intrinsic height on 10.9 */
     {
         NSUserDefaults *sud = NSUserDefaults.standardUserDefaults;
         int saved = [sud objectForKey:@"stopAfterMinutes"] ? (int)[sud integerForKey:@"stopAfterMinutes"]
@@ -841,7 +841,8 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     char lb[48];
     app_stop_after_label(mins, lb, sizeof(lb));
     _stopAfterPopup.stringValue = @(lb);
-    app_set_stop_after_minutes(g_app, mins);
+    if (g_app) /* the box can end editing while the app quits */
+        app_set_stop_after_minutes(g_app, mins);
     [NSUserDefaults.standardUserDefaults setInteger:mins forKey:@"stopAfterMinutes"];
 }
 
