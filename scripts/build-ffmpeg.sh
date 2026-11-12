@@ -43,8 +43,9 @@ FEATURES="--disable-everything --disable-autodetect --disable-doc --disable-debu
   --disable-ffplay --disable-ffprobe --disable-avdevice --enable-static --disable-shared
   --enable-swscale --enable-swresample
   --enable-protocol=file,pipe
-  --enable-demuxer=dv
-  --enable-decoder=dvvideo,pcm_s16le
+  --enable-demuxer=dv,mpegts
+  --enable-parser=mpegvideo,mpegaudio
+  --enable-decoder=dvvideo,pcm_s16le,mpeg2video,mp2,mp2float
   --enable-encoder=rawvideo,pcm_s16le,pcm_s16be,mpeg2video,mp2,aac
   --enable-muxer=rawvideo,pcm_s16le,pcm_s16be,mpeg2dvd,mp4
   --enable-filter=yadif,scale,format,null,anull,aformat,aresample"

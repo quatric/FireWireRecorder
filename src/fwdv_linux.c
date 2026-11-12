@@ -33,7 +33,7 @@
 #define FCP_RESPONSE 0xfffff0000d00ULL
 #define OPCR0 0xfffff0000904ULL
 
-#define PKTSZ 512    /* receive slot per packet (DV: 8 CIP + 480 bytes) */
+#define PKTSZ 2048 /* receive slot per packet (DV: 8 CIP + 480 bytes; HDV: several 192-byte source packets) */
 #define NPKTS 1024   /* ring of slots, ~128 ms at 8000 packets/s */
 #define IRQ_EVERY 32 /* an interrupt (event) every this many packets */
 

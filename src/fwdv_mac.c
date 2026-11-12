@@ -31,7 +31,7 @@ typedef DCLCallProcDataType procdata_t;
 #endif
 
 #define NPKT 1600  /* 200 ms of cycles */
-#define PKTSZ 512  /* isoch header, CIP header and 480 bytes of DIF blocks fit */
+#define PKTSZ 2048 /* isoch header, CIP header and up to 2000 bytes: DV (480) or HDV (several 192-byte source packets) */
 #define GROUP 100  /* a callback every 12.5 ms */
 
 struct fwdv {

@@ -46,7 +46,13 @@ void dv_assemble(dv_assembler_t *a, const uint8_t *p, size_t n)
     if ((p[4] & 0x3f) == 0x20) { /* FMT 0x20: MPEG2-TS (HDV), 188-byte packets, usually with a 4-byte time stamp */
         if (!g_ts_cb)
             return;
-        size_t sph = p[2] & 0x04 ? 4 : 0, stride = 188 + sph;
+        /* source packets are 192 bytes (4-byte time stamp first) or 188; the payload size says which */
+        size_t sph = p[2] & 0x04 ? 4 : 0, pl = n - 8;
+        if (pl && pl % 192 == 0)
+            sph = 4;
+        else if (pl && pl % 188 == 0)
+            sph = 0;
+        size_t stride = 188 + sph;
         const uint8_t *q = p + 8;
         for (size_t o = 0; o + stride <= n - 8; o += stride) {
             if (q[o + sph] != 0x47) /* not a TS packet: padding or a bus glitch */
