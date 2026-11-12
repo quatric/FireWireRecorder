@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -33,8 +34,39 @@ static void rec_done(void *u, int ok, const char *p)
     done = 1;
 }
 
+/* the DV data code: a frame with REC DATE/REC TIME packs in its VAUX, and one with them in the subcode only */
+static int test_rec_datetime(void)
+{
+    static uint8_t f[DV_FRAME_525];
+    dv_recdate_t d;
+    memset(f, 0xff, sizeof(f));
+    if (dv_rec_datetime(f, sizeof(f), &d))
+        return fprintf(stderr, "rec date: found one in an empty frame\n"), 1;
+    for (int s = 0; s < 10; s++)
+        for (int b = 0; b < 150; b++)
+            f[(s * 150 + b) * 80] = (uint8_t)(b == 0 ? 0x1f : b < 3 ? 0x3f : b < 6 ? 0x5f : 0x9f); /* SCT */
+    uint8_t *ssyb = f + 1 * 80 + 3 + 2 * 8 + 3, *ssyb2 = f + 2 * 80 + 3 + 4 * 8 + 3;
+    memcpy(ssyb, "\x62\xff\x09\x12\x98", 5);  /* 9 Dec 1998 */
+    memcpy(ssyb2, "\x63\xff\x05\x30\x21", 5); /* 21:30:05 */
+    if (!dv_rec_datetime(f, sizeof(f), &d) || d.year != 1998 || d.month != 12 || d.day != 9 || !d.has_time ||
+        d.hour != 21 || d.min != 30 || d.sec != 5)
+        return fprintf(stderr, "rec date (subcode): %d-%d-%d %d %d:%d:%d\n", d.year, d.month, d.day, d.has_time,
+                       d.hour, d.min, d.sec), 1;
+    uint8_t *vaux = f + (3 * 150 + 4) * 80 + 3 + 6 * 5; /* sequence 3, VAUX block 2, pack 6 */
+    memcpy(vaux, "\x62\xe5\xd4\xe7\x03", 5);      /* 14 Jul 2003 (the top bits of each byte are flags) */
+    memcpy(vaux + 5, "\x63\xc0\x07\x42\x15", 5);  /* 15:42:07 */
+    if (!dv_rec_datetime(f, sizeof(f), &d) || d.year != 2003 || d.month != 7 || d.day != 14 || d.hour != 15 ||
+        d.min != 42 || d.sec != 7)
+        return fprintf(stderr, "rec date (VAUX): %d-%d-%d %d:%d:%d\n", d.year, d.month, d.day, d.hour, d.min,
+                       d.sec), 1;
+    fprintf(stderr, "rec date: ok\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (test_rec_datetime())
+        return 1;
     const char *dir = argc > 1 ? argv[1] : ".";
     struct timespec t0, t;
     clock_gettime(CLOCK_MONOTONIC, &t0);

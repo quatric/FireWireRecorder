@@ -178,6 +178,76 @@ void avc_parse_medium(const uint8_t *r, int n, fwdv_status_t *st)
         st->has_tape = r[3] != 0x60;
 }
 
+/* ---- the recording date and time (IEC 61834-4 packs 0x62 and 0x63) ---- */
+
+static int bcd_ok(int v, int tens_mask)
+{
+    return (v & 0x0f) <= 9 && ((v >> 4) & tens_mask) <= 9;
+}
+
+/* pack: 5 bytes, the first its header (0x62 or 0x63); fills the date or the time */
+static void rec_pack(const uint8_t *pk, dv_recdate_t *d, int *got_date, int *got_time)
+{
+    if (pk[0] == 0x62 && !*got_date) {
+        int day = pk[2] & 0x3f, mon = pk[3] & 0x1f, yr = pk[4];
+        if (pk[2] == 0xff || pk[3] == 0xff || pk[4] == 0xff || !bcd_ok(day, 3) || !bcd_ok(mon, 1) || !bcd_ok(yr, 15))
+            return;
+        int y = bcd(yr), m = bcd(mon), dd = bcd(day);
+        if (m < 1 || m > 12 || dd < 1 || dd > 31)
+            return;
+        d->year = y + (y < 70 ? 2000 : 1900); /* two digits: DV began in 1995 */
+        d->month = m;
+        d->day = dd;
+        *got_date = 1;
+    } else if (pk[0] == 0x63 && !*got_time) {
+        int s = pk[2] & 0x7f, mi = pk[3] & 0x7f, h = pk[4] & 0x3f;
+        if (pk[2] == 0xff || pk[3] == 0xff || pk[4] == 0xff || !bcd_ok(s, 7) || !bcd_ok(mi, 7) || !bcd_ok(h, 3))
+            return;
+        if (bcd(h) > 23 || bcd(mi) > 59 || bcd(s) > 59)
+            return;
+        d->hour = bcd(h);
+        d->min = bcd(mi);
+        d->sec = bcd(s);
+        *got_time = 1;
+    }
+}
+
+int dv_rec_datetime(const uint8_t *frame, size_t len, dv_recdate_t *out)
+{
+    dv_recdate_t d;
+    memset(&d, 0, sizeof(d));
+    memset(out, 0, sizeof(*out));
+    if (len != DV_FRAME_525 && len != DV_FRAME_625)
+        return 0;
+    int seqs = len == DV_FRAME_625 ? 12 : 10, got_date = 0, got_time = 0;
+    /* a DIF sequence is 150 blocks of 80 bytes: header, 2 subcode, 3 VAUX, then audio and video */
+    for (int s = 0; s < seqs && !(got_date && got_time); s++) {
+        const uint8_t *seq = frame + (size_t)s * 150 * 80;
+        for (int b = 3; b < 6; b++) { /* VAUX: 15 packs of 5 bytes after the 3-byte block ID */
+            const uint8_t *blk = seq + b * 80;
+            if (blk[0] >> 5 != 2)
+                continue;
+            for (int k = 0; k < 15; k++)
+                rec_pack(blk + 3 + k * 5, &d, &got_date, &got_time);
+        }
+    }
+    for (int s = 0; s < seqs && !(got_date && got_time); s++) {
+        const uint8_t *seq = frame + (size_t)s * 150 * 80;
+        for (int b = 1; b < 3; b++) { /* subcode: 6 sync blocks of 8 bytes, each 2 ID bytes, FF, a pack */
+            const uint8_t *blk = seq + b * 80;
+            if (blk[0] >> 5 != 1)
+                continue;
+            for (int k = 0; k < 6; k++)
+                rec_pack(blk + 3 + k * 8 + 3, &d, &got_date, &got_time);
+        }
+    }
+    if (!got_date)
+        return 0;
+    d.has_time = got_time;
+    *out = d;
+    return 1;
+}
+
 /* ---- sending: DV frame -> CIP packets ---- */
 
 #define TICKS_PER_CYCLE 3072.0

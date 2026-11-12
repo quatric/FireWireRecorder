@@ -551,8 +551,13 @@ static void tick_ui(void)
         if (ts.has_tape == 0 && ts.mode != FWDV_MODE_CAMERA)
             mode = "No tape";
     }
+    char shot[32], state[96];
+    if (app_tape_datetime(G.app, shot, sizeof(shot)))
+        snprintf(state, sizeof(state), "%s%sShot %s", mode, *mode ? "   " : "", shot);
+    else
+        snprintf(state, sizeof(state), "%s", mode);
     set_text(G.timecode, tc);
-    set_text(G.tape_state, mode);
+    set_text(G.tape_state, state);
     if (rec && !G.finishing && (app_auto_stop_due(G.app) || app_stop_after_due(G.app)))
         stop_recording(); /* "Stop at end of tape" or "Stop after" */
 

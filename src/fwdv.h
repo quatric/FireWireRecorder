@@ -101,6 +101,15 @@ typedef struct {
 /* p: an isochronous packet's payload starting at its CIP header, n bytes */
 void dv_assemble(dv_assembler_t *a, const uint8_t *p, size_t n);
 
+/* The date and time the camcorder wrote into a DV frame when it was recorded (the "data code"): the
+ * REC DATE (0x62) and REC TIME (0x63) packs of the VAUX blocks, or of the subcode when the VAUX has
+ * none. Returns 1 if the frame carries a date (and then has_time says whether a time came with it). */
+typedef struct {
+    int year, month, day;
+    int has_time, hour, min, sec;
+} dv_recdate_t;
+int dv_rec_datetime(const uint8_t *frame, size_t len, dv_recdate_t *out);
+
 /* AV/C helpers on raw frames: the frames come back from the device as built
  * here, and the answer is parsed into a status; ctype is the response byte. */
 int avc_cmd_bytes(fwdv_cmd_t cmd, uint8_t out[8]);

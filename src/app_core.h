@@ -47,6 +47,10 @@ int app_signal(app_t *a, int *w, int *h, int *fps);
 int app_tape(app_t *a, fwdv_cmd_t cmd); /* 0, or an FWDV_ERR_* */
 /* The last status read from the device (every half second); 0 if there is one. */
 int app_tape_status(app_t *a, fwdv_status_t *st);
+/* When the picture coming in was shot, from the DV data code the camcorder recorded with it:
+ * "2003-07-14 15:42:07" (or just the date). 1 if there is one; 0 (out = "") with no DV picture,
+ * or when the tape carries no date. */
+int app_tape_datetime(app_t *a, char *out, int len);
 
 /* ---- preview ----
  * Frames are 32-bit pixels 0x00RRGGBB (BGRX bytes, a Windows DIB), 720x480 or

@@ -99,6 +99,8 @@ struct app {
     int64_t last_frame_ms;
     volatile int pal, wide;    /* of the latest frame */
     volatile int hdv;          /* the stream is HDV (MPEG-2 transport stream), not DV */
+    dv_recdate_t rec_date;     /* the date and time the latest frame was shot (under data_lock) */
+    int rec_date_ok;
     volatile int hdv_w, hdv_h; /* its picture size, from the sequence header */
     uint8_t hdv_tail[8];       /* last bytes of the previous chunk (a start code can straddle chunks) */
     int rec_hdv;
@@ -375,8 +377,12 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
     a->pal = pal;
     a->hdv = 0;
     a->wide = frame_is_wide(frame);
+    dv_recdate_t rd;
+    int rd_ok = dv_rec_datetime(frame, len, &rd);
     pthread_mutex_lock(&a->data_lock);
     a->last_frame_ms = now_ms();
+    a->rec_date = rd;
+    a->rec_date_ok = rd_ok;
     if (a->rec) {
         sink_push(a->rec, frame, len);
         a->rec_frames++;
@@ -780,6 +786,22 @@ int app_tape_status(app_t *a, fwdv_status_t *st)
         *st = a->tape;
     pthread_mutex_unlock(&a->lock);
     return ok ? 0 : -1;
+}
+
+int app_tape_datetime(app_t *a, char *out, int len)
+{
+    out[0] = 0;
+    pthread_mutex_lock(&a->data_lock);
+    int ok = a->rec_date_ok && !a->hdv && now_ms() - a->last_frame_ms < 1000;
+    dv_recdate_t d = a->rec_date;
+    pthread_mutex_unlock(&a->data_lock);
+    if (!ok)
+        return 0;
+    if (d.has_time)
+        snprintf(out, (size_t)len, "%04d-%02d-%02d %02d:%02d:%02d", d.year, d.month, d.day, d.hour, d.min, d.sec);
+    else
+        snprintf(out, (size_t)len, "%04d-%02d-%02d", d.year, d.month, d.day);
+    return 1;
 }
 
 /* ---- picture ---- */

@@ -11,7 +11,8 @@ records what comes over the cable:
 - **x264** (`.mp4`): deinterlaced H.264 with AAC audio, small and plays anywhere
 
 The tape's timecode and state (playing, paused, rewinding, no tape) are shown next to the
-transport buttons. "Stop at end of tape" ends the recording by itself once the tape stops or the
+transport buttons, with the date and time the picture was shot, read from the DV data code the
+camcorder recorded with it (shown while a DV tape with a data code is playing). "Stop at end of tape" ends the recording by itself once the tape stops or the
 picture goes away. The preview can be switched off (View → Show Preview, or the Preview checkbox)
 to save CPU on slow machines while recording.
 "Stop after" ends a recording by itself after a time you choose (default: no limit): pick 5 minutes up to 12 hours (4, 6, 8, 10 and 12 hours match VHS tape lengths), or type your own (`45`, `90 min`, `2h`, `1:30`).

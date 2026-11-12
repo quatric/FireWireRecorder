@@ -463,7 +463,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     volatile int _showing; /* a frame is on its way to the main thread */
 
     NSButton *_tape[TAPE_BUTTONS];
-    NSTextField *_timecodeLabel, *_tapeLabel;
+    NSTextField *_timecodeLabel, *_dateLabel, *_tapeLabel;
     NSPopUpButton *_formatPopup;
     NSComboBox *_stopAfterPopup;
     NSButton *_autoStopCheck, *_previewCheck, *_monitorCheck, *_recordButton, *_folderButton;
@@ -584,16 +584,21 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     _timecodeLabel = make_label(@"--:--:--.--");
     _timecodeLabel.font = mono_font(15, NO);
     _timecodeLabel.toolTip = @"The tape's timecode";
+    _dateLabel = make_label(@"");
+    _dateLabel.font = mono_font(13, NO);
+    _dateLabel.toolTip = @"When this picture was shot: the date and time the camcorder recorded with it";
     _tapeLabel = make_label(@"");
     _tapeLabel.textColor = label_color(YES);
     [_tapeLabel.cell setLineBreakMode:NSLineBreakByTruncatingTail];
     [tape addObject:_timecodeLabel];
+    [tape addObject:_dateLabel];
     [tape addObject:_tapeLabel];
     Box *row1 = stack(tape);
     row1.spacing = 4;
     row1.flexible = _tapeLabel;
     [row1 setGap:16 afterView:_tape[TAPE_FF]];
     [row1 setGap:12 afterView:_timecodeLabel];
+    [row1 setGap:12 afterView:_dateLabel];
 
     /* row 2: recording settings */
     _formatPopup = make_popup(app_format_names, APP_FORMATS, self, @selector(formatChanged:));
@@ -1096,6 +1101,11 @@ static CVReturn display_link_cb(CVDisplayLinkRef link, const CVTimeStamp *now, c
         _timecodeLabel.stringValue = @"--:--:--.--";
         _tapeLabel.stringValue = @"";
     }
+    char shot[32];
+    app_tape_datetime(g_app, shot, sizeof(shot));
+    NSString *shotText = [NSString stringWithUTF8String:shot];
+    if (![_dateLabel.stringValue isEqualToString:shotText])
+        _dateLabel.stringValue = shotText;
 
     if (rec && !_finishing && app_auto_stop_due(g_app))
         [self stopRecording]; /* "Stop at end of tape" */

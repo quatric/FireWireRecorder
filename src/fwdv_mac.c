@@ -73,14 +73,24 @@ struct fwdv {
     dv_tx_t tx;
     int tx_cur_slot;     /* the queue slot the packetizer is reading, or -1 */
     int tx_start_cycle, tx_connected, tx_synced, tx_modify_errors;
+    uint64_t tx_switched_groups; /* callbacks seen: 0 means the DMA program is not running */
     UInt16 tx_sizes[NPKT];
-    DCLCallProc tx_calls[NPKT / GROUP];
+    uint8_t tx_sel[NPKT]; /* what each cycle is wired to send now: 1 its data packet, 0 its empty one */
+    /* every cycle has two send DCLs, a full data packet (A) and an empty one (E); the jumps after
+     * cycle i-1's packets point at the one cycle i sends */
+    DCLSetTagSyncBits tx_tag;
+    DCLLabel tx_labA[NPKT], tx_labE[NPKT];
+    DCLTransferPacket tx_sendE[NPKT];
+    DCLJump tx_jmpA[NPKT], tx_jmpE[NPKT];
+    DCLCallProc tx_callsA[NPKT / GROUP], tx_callsE[NPKT / GROUP];
 #endif
 };
 
 #define TXQ 24      /* frames waiting to go out: 0.8 s */
 #define TXCHAN 1    /* the isochronous channel the camcorder listens on */
-#define TXSZ 512    /* one cycle's packet: 8 CIP + 480 */
+#define TXDATA 488  /* a data packet: 8 CIP + 480 */
+#define TXEMPTY 8   /* an empty packet: the CIP header alone */
+#define TXEOFF 1024 /* where in its slot a cycle's empty packet is kept */
 
 static fwdv_t *g_rx; /* the remote port's callbacks have no refcon on 10.3 */
 
@@ -526,6 +536,8 @@ static void tx_fill(fwdv_t *d, int i)
     uint8_t *buf = d->bufs + (size_t)i * PKTSZ;
     int n = dv_tx_packet(&d->tx, buf);
     d->tx_sizes[i] = (UInt16)n;
+    if (n != TXDATA)
+        memcpy(buf + TXEOFF, buf, TXEMPTY); /* the empty DCL sends from here */
     if (d->tx.frame_done) { /* the frame is entirely in packets: its slot is free again */
         d->tx.frame_done = 0;
         d->tx_head = (d->tx_head + 1) % TXQ;
@@ -558,14 +570,28 @@ static void tx_group(DCLCommand *cmd)
         }
         d->tx_synced = 1;
     }
+    /* Group g has just gone out; refill it. A packet's size cannot be changed once the program is
+     * compiled (IOFireWireLib's ModifyTransferPacketDCLSize is a stub returning kIOReturnUnsupported),
+     * so each cycle has a data DCL and an empty DCL, and the jumps before it pick one. */
     for (int i = 0; i < GROUP; i++) {
         int slot = (int)(g * GROUP + i);
         tx_fill(d, slot);
-        /* the DCLs were compiled at full size; an empty packet is the same DCL made shorter */
-        IOReturn e = (*d->lport)->ModifyTransferPacketDCLSize(d->lport, &d->xfer[slot], d->tx_sizes[slot]);
-        if (e && !d->tx_modify_errors++ && fwdv_verbose)
-            fprintf(stderr, "fwdv: changing a packet's size failed: %08x\n", e);
+        int want = d->tx_sizes[slot] == TXDATA;
+        if (want != d->tx_sel[slot]) {
+            int prev = (slot + NPKT - 1) % NPKT;
+            DCLLabel *to = want ? &d->tx_labA[slot] : &d->tx_labE[slot];
+            IOReturn e = (*d->lport)->ModifyJumpDCL(d->lport, &d->tx_jmpA[prev], to);
+            if (!e)
+                e = (*d->lport)->ModifyJumpDCL(d->lport, &d->tx_jmpE[prev], to);
+            if (e) {
+                if (!d->tx_modify_errors++ && fwdv_verbose)
+                    fprintf(stderr, "fwdv: switching a cycle's packet failed: %08x\n", e);
+            } else {
+                d->tx_sel[slot] = (uint8_t)want;
+            }
+        }
     }
+    d->tx_switched_groups++;
     pthread_mutex_unlock(&d->tx_lock);
 }
 
@@ -600,39 +626,63 @@ static int tx_setup(fwdv_t *d)
     d->tx_cur_slot = -1;
 
     pthread_mutex_lock(&d->tx_lock);
-    DCLCommand *prev = (DCLCommand *)&d->label;
+    d->tx_switched_groups = 0;
+    for (int i = 0; i < NPKT; i++)
+        tx_fill(d, i);
+    /* The program: a start (tag 1, CIP data; then a jump to cycle 0's packet), and for every cycle i
+     *   A_i: label, send data packet (488), [call every GROUP cycles], jump to cycle i+1's packet
+     *   E_i: label, send empty packet (8),  [call every GROUP cycles], jump to cycle i+1's packet
+     * The last cycle's jumps lead back to cycle 0. */
+    memset(&d->tx_tag, 0, sizeof(d->tx_tag));
+    d->tx_tag.opcode = kDCLSetTagSyncBitsOp;
+    d->tx_tag.tagBits = 1;
+    d->tx_tag.syncBits = 0;
     memset(&d->label, 0, sizeof(d->label));
     d->label.opcode = kDCLLabelOp;
-    DCLSetTagSyncBits *tag = calloc(1, sizeof(*tag)); /* tag 1: CIP-formatted data */
-    tag->opcode = kDCLSetTagSyncBitsOp;
-    tag->tagBits = 1;
-    tag->syncBits = 0;
-    prev->pNextDCLCommand = (DCLCommand *)tag;
-    prev = (DCLCommand *)tag;
-    for (int i = 0; i < NPKT; i++) {
-        tx_fill(d, i);
-        DCLTransferPacket *x = &d->xfer[i];
-        memset(x, 0, sizeof(*x));
-        x->opcode = kDCLSendPacketStartOp;
-        x->buffer = d->bufs + (size_t)i * PKTSZ;
-        x->size = TXSZ - 24; /* 488: the largest packet; the DCL can only be made shorter later */
-        prev->pNextDCLCommand = (DCLCommand *)x;
-        prev = (DCLCommand *)x;
-        if ((i + 1) % GROUP == 0) {
-            DCLCallProc *c = &d->tx_calls[i / GROUP];
-            memset(c, 0, sizeof(*c));
-            c->opcode = kDCLCallProcOp;
-            c->proc = tx_group;
-            c->procData = (procdata_t)(long)(i / GROUP);
-            prev->pNextDCLCommand = (DCLCommand *)c;
-            prev = (DCLCommand *)c;
-        }
-    }
-    pthread_mutex_unlock(&d->tx_lock);
+    d->label.pNextDCLCommand = (DCLCommand *)&d->tx_tag;
     memset(&d->jump, 0, sizeof(d->jump));
     d->jump.opcode = kDCLJumpOp;
-    d->jump.pJumpDCLLabel = &d->label;
-    prev->pNextDCLCommand = (DCLCommand *)&d->jump;
+    d->tx_tag.pNextDCLCommand = (DCLCommand *)&d->jump;
+    DCLCommand *prev = (DCLCommand *)&d->jump;
+    for (int i = 0; i < NPKT; i++) {
+        d->tx_sel[i] = d->tx_sizes[i] == TXDATA;
+        for (int k = 0; k < 2; k++) {
+            DCLLabel *lab = k ? &d->tx_labE[i] : &d->tx_labA[i];
+            DCLTransferPacket *x = k ? &d->tx_sendE[i] : &d->xfer[i];
+            DCLJump *j = k ? &d->tx_jmpE[i] : &d->tx_jmpA[i];
+            memset(lab, 0, sizeof(*lab));
+            lab->opcode = kDCLLabelOp;
+            prev->pNextDCLCommand = (DCLCommand *)lab;
+            memset(x, 0, sizeof(*x));
+            x->opcode = kDCLSendPacketStartOp;
+            x->buffer = d->bufs + (size_t)i * PKTSZ + (k ? TXEOFF : 0);
+            x->size = k ? TXEMPTY : TXDATA;
+            lab->pNextDCLCommand = (DCLCommand *)x;
+            prev = (DCLCommand *)x;
+            if ((i + 1) % GROUP == 0) {
+                DCLCallProc *c = k ? &d->tx_callsE[i / GROUP] : &d->tx_callsA[i / GROUP];
+                memset(c, 0, sizeof(*c));
+                c->opcode = kDCLCallProcOp;
+                c->proc = tx_group;
+                c->procData = (procdata_t)(long)(i / GROUP);
+                prev->pNextDCLCommand = (DCLCommand *)c;
+                prev = (DCLCommand *)c;
+            }
+            memset(j, 0, sizeof(*j));
+            j->opcode = kDCLJumpOp;
+            prev->pNextDCLCommand = (DCLCommand *)j;
+            prev = (DCLCommand *)j;
+        }
+    }
+    prev->pNextDCLCommand = NULL;
+    for (int i = 0; i < NPKT; i++) {
+        int n = (i + 1) % NPKT;
+        DCLLabel *to = d->tx_sel[n] ? &d->tx_labA[n] : &d->tx_labE[n];
+        d->tx_jmpA[i].pJumpDCLLabel = to;
+        d->tx_jmpE[i].pJumpDCLLabel = to;
+    }
+    d->jump.pJumpDCLLabel = d->tx_sel[0] ? &d->tx_labA[0] : &d->tx_labE[0];
+    pthread_mutex_unlock(&d->tx_lock);
 
     IOVirtualRange br = { (IOVirtualAddress)d->bufs, NPKT * PKTSZ };
     d->lport = (*d->dev)->CreateLocalIsochPort(d->dev, true, (DCLCommand *)&d->label, 0, 0, 0, NULL, 0, &br, 1,
@@ -640,9 +690,12 @@ static int tx_setup(fwdv_t *d)
     d->rport = (*d->dev)->CreateRemoteIsochPort(d->dev, false, CFUUIDGetUUIDBytes(kIOFireWireRemoteIsochPortInterfaceID));
     d->chan = (*d->dev)->CreateIsochChannel(d->dev, true, 488, kFWSpeed100MBit,
                                             CFUUIDGetUUIDBytes(kIOFireWireIsochChannelInterfaceID));
-    free(tag);
-    if (!d->lport || !d->rport || !d->chan)
+    if (!d->lport || !d->rport || !d->chan) {
+        if (fwdv_verbose)
+            fprintf(stderr, "fwdv: creating the transmit ports failed (%p %p %p)\n", (void *)d->lport,
+                    (void *)d->rport, (void *)d->chan);
         return FWDV_ERR_IO;
+    }
     (*d->rport)->SetGetSupportedHandler(d->rport, rp_supported);
     (*d->rport)->SetAllocatePortHandler(d->rport, rp_alloc);
     (*d->rport)->SetReleasePortHandler(d->rport, rp_ok);
@@ -655,10 +708,6 @@ static int tx_setup(fwdv_t *d)
             fprintf(stderr, "fwdv: isochronous transmit setup failed: %08x\n", e);
         return FWDV_ERR_IO;
     }
-    /* the empty packets in the first ring are shorter than the DCLs were compiled for */
-    for (int i = 0; i < NPKT; i++)
-        if (d->tx_sizes[i] != TXSZ - 24)
-            (*d->lport)->ModifyTransferPacketDCLSize(d->lport, &d->xfer[i], d->tx_sizes[i]);
     /* tell the camcorder's input plug which channel to listen to, then start sending */
     if ((e = (*d->avc)->makeP2PInputConnection(d->avc, 0, TXCHAN))) {
         if (fwdv_verbose)
@@ -768,6 +817,10 @@ void fwdv_send_stop(fwdv_t *d, int drain)
     if (d->loop)
         CFRunLoopStop(d->loop);
     pthread_join(d->tx_thread, NULL);
+    if (fwdv_verbose)
+        fprintf(stderr, "fwdv: sent %llu of %llu frames; %llu transmit callbacks, %d packet switches failed\n",
+                (unsigned long long)d->tx_sent, (unsigned long long)d->tx_queued,
+                (unsigned long long)d->tx_switched_groups, d->tx_modify_errors);
     d->tx_thread = 0;
     d->loop = NULL;
     g_rx = NULL;

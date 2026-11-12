@@ -848,6 +848,12 @@ static void rec_done(void *user, int ok, const char *path)
         if (ts.has_tape == 0 && ts.mode != FWDV_MODE_CAMERA)
             mode = @"No tape";
     }
+    {
+        char shot[32];
+        if (app_tape_datetime(g_app, shot, sizeof(shot)))
+            mode = [mode length] ? [NSString stringWithFormat:@"%@   Shot %s", mode, shot]
+                                 : [NSString stringWithFormat:@"Shot %s", shot];
+    }
     if (![[_timecode stringValue] isEqualToString:tc])
         [_timecode setStringValue:tc];
     if (![[_tapeState stringValue] isEqualToString:mode])
