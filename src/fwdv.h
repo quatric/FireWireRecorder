@@ -52,7 +52,8 @@ int fwdv_alive(fwdv_t *d);
 
 typedef enum {
     FWDV_PLAY, FWDV_PAUSE, FWDV_STOP, FWDV_REWIND, FWDV_FFWD,
-    FWDV_PLAY_REVERSE, FWDV_STEP_BACK, FWDV_STEP_FWD
+    FWDV_PLAY_REVERSE, FWDV_STEP_BACK, FWDV_STEP_FWD,
+    FWDV_RECORD, FWDV_RECORD_PAUSE /* record what is being sent to the camcorder (see fwdv_send_start) */
 } fwdv_cmd_t;
 int fwdv_transport(fwdv_t *d, fwdv_cmd_t cmd);
 
@@ -69,6 +70,19 @@ typedef struct {
     int tc_h, tc_m, tc_s, tc_f;
 } fwdv_status_t;
 int fwdv_status(fwdv_t *d, fwdv_status_t *st);
+
+/* ---- sending DV to the camcorder (recording onto its tape) ----
+ * fwdv_send_start opens an isochronous transmit channel to the device's input plug (stop
+ * receiving first: fwdv_stop). fwdv_send_frame then queues whole DV frames (120000 or 144000
+ * bytes) and blocks while the queue is full, so the caller is paced at the real frame rate once
+ * it is ahead; *abort (may be NULL) ends the wait. The tape must be told to FWDV_RECORD after the
+ * stream is running. fwdv_send_stop(drain=1) lets what is queued play out first.
+ * macOS only for now; the others return FWDV_ERR_UNSUPPORTED. */
+int fwdv_send_start(fwdv_t *d, int pal);
+int fwdv_send_frame(fwdv_t *d, const uint8_t *frame, size_t len, volatile int *abort);
+void fwdv_send_stop(fwdv_t *d, int drain);
+/* frames accepted and frames actually put on the bus so far */
+void fwdv_send_stats(fwdv_t *d, uint64_t *queued, uint64_t *sent);
 
 void fwdv_set_verbose(int level);
 
@@ -93,6 +107,23 @@ int avc_cmd_bytes(fwdv_cmd_t cmd, uint8_t out[8]);
 void avc_parse_transport(const uint8_t *r, int n, fwdv_status_t *st);
 void avc_parse_timecode(const uint8_t *r, int n, fwdv_status_t *st);
 void avc_parse_medium(const uint8_t *r, int n, fwdv_status_t *st);
+
+/* ---- DV -> isochronous packets (IEC 61883-2), one call per bus cycle (125 us) ---- */
+
+#define DV_TX_AHEAD 4 /* cycles between sending a packet and the time stamp in it */
+typedef struct {
+    int pal, idx, npkt;
+    uint8_t dbc;
+    uint64_t cycle;       /* the bus cycle the next packet goes out in (counted from the start) */
+    double next_pt, step; /* presentation time of the next data packet, in 24.576 MHz ticks */
+    const uint8_t *frame; /* the frame being sent, or NULL (then the packets are empty) */
+    int frame_done;       /* set when the last packet of a frame was produced */
+} dv_tx_t;
+
+void dv_tx_init(dv_tx_t *t, int pal, uint32_t start_cycle);
+/* Writes the next cycle's packet to out (at least 488 bytes): 488 bytes carrying 6 DIF blocks of
+ * the frame, or 8 bytes (an empty packet) when it is not time or there is no frame. Returns the size. */
+int dv_tx_packet(dv_tx_t *t, uint8_t *out);
 
 extern int fwdv_verbose;
 

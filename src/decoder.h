@@ -25,6 +25,8 @@ int dec_feed(decoder_t *d, const uint8_t *data, size_t len);
 uint64_t dec_dropped(decoder_t *d);
 /* Writes what is queued, closes ffmpeg's input and waits for it to exit; 0 if it succeeded. */
 int dec_finish(decoder_t *d);
+/* Kills ffmpeg without waiting; safe from the output callback (dec_finish or dec_stop still has to follow). */
+void dec_abort(decoder_t *d);
 /* Ends ffmpeg (killing it if it does not exit) and waits for the reader. */
 void dec_stop(decoder_t *d);
 

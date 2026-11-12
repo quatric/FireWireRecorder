@@ -53,10 +53,64 @@ static void on_ts(const uint8_t *ts, size_t len, void *user)
     g_last_frame = time(NULL);
 }
 
+/* Records a raw .dv file onto the camcorder's tape: the camcorder must be in VCR mode with a
+ * recordable tape, and records from the tape's current position. */
+static int send_file(fwdv_t *d, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        return 1;
+    }
+    static uint8_t buf[DV_FRAME_625];
+    if (fread(buf, 1, DV_FRAME_525, f) != DV_FRAME_525) {
+        fprintf(stderr, "fwdv-capture: %s is not a DV file\n", path);
+        fclose(f);
+        return 1;
+    }
+    int pal = buf[3] & 0x80; /* DSF in the header block */
+    size_t len = pal ? DV_FRAME_625 : DV_FRAME_525;
+    if (pal && fread(buf + DV_FRAME_525, 1, len - DV_FRAME_525, f) != len - DV_FRAME_525) {
+        fprintf(stderr, "fwdv-capture: %s ends in the middle of a frame\n", path);
+        fclose(f);
+        return 1;
+    }
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    int r = fwdv_send_start(d, pal);
+    if (r) {
+        fprintf(stderr, "fwdv-capture: cannot send: %s\n", fwdv_strerror(r));
+        fclose(f);
+        return 1;
+    }
+    long n = 0;
+    int recording = 0;
+    do {
+        if ((r = fwdv_send_frame(d, buf, len, &g_stop)))
+            break;
+        n++;
+        if (n == 15 && !recording) { /* the stream is running: tell the tape to record it */
+            if ((r = fwdv_transport(d, FWDV_RECORD)))
+                fprintf(stderr, "fwdv-capture: record: %s\n", fwdv_strerror(r));
+            recording = 1;
+        }
+        if (n % 30 == 0)
+            fprintf(stderr, "\r%ld frames sent", n);
+    } while (!g_stop && fread(buf, 1, len, f) == len);
+    fclose(f);
+    if (!recording && !r)
+        fwdv_transport(d, FWDV_RECORD);
+    fwdv_send_stop(d, !g_stop);
+    fwdv_transport(d, FWDV_STOP);
+    fprintf(stderr, "\nfwdv-capture: sent %ld frames%s\n", n, r ? " (stopped early)" : "");
+    return r ? 1 : 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [options]\n"
+            "      --send FILE     record a raw DV file onto the tape (camcorder in VCR mode, from the current position)\n"
             "  -o, --output FILE   raw DV (HDV: transport stream) file, - for stdout (without -o: only tape commands)\n"
             "  -t, --time SECONDS  stop recording after this many seconds\n"
             "      --play          start the tape playing first\n"
@@ -75,7 +129,7 @@ static const char *mode_name(fwdv_mode_t m)
     return (unsigned)m < sizeof(n) / sizeof(n[0]) ? n[m] : "unknown";
 }
 
-enum { OPT_PLAY = 256, OPT_UNTIL, OPT_STOP, OPT_PAUSE, OPT_REW, OPT_FF, OPT_INFO };
+enum { OPT_PLAY = 256, OPT_UNTIL, OPT_STOP, OPT_PAUSE, OPT_REW, OPT_FF, OPT_INFO, OPT_SEND };
 
 int main(int argc, char **argv)
 {
@@ -84,10 +138,10 @@ int main(int argc, char **argv)
         { "play", no_argument, 0, OPT_PLAY },    { "until-stop", no_argument, 0, OPT_UNTIL },
         { "stop", no_argument, 0, OPT_STOP },    { "pause", no_argument, 0, OPT_PAUSE },
         { "rewind", no_argument, 0, OPT_REW },   { "ffwd", no_argument, 0, OPT_FF },
-        { "info", no_argument, 0, OPT_INFO },    { "verbose", no_argument, 0, 'v' },
+        { "send", required_argument, 0, OPT_SEND }, { "info", no_argument, 0, OPT_INFO },    { "verbose", no_argument, 0, 'v' },
         { "help", no_argument, 0, 'h' },         { 0, 0, 0, 0 },
     };
-    const char *outpath = NULL;
+    const char *outpath = NULL, *sendpath = NULL;
     double seconds = 0;
     int play = 0, until = 0, info = 0, verbose = 0, c;
     int cmd = -1;
@@ -102,6 +156,7 @@ int main(int argc, char **argv)
         case OPT_REW: cmd = FWDV_REWIND; break;
         case OPT_FF: cmd = FWDV_FFWD; break;
         case OPT_INFO: info = 1; break;
+        case OPT_SEND: sendpath = optarg; break;
         case 'v': verbose++; break;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 2;
@@ -116,6 +171,12 @@ int main(int argc, char **argv)
         return 1;
     }
     fprintf(stderr, "fwdv-capture: %s\n", fwdv_name(d));
+
+    if (sendpath) { /* record a raw DV file onto the tape, from where it is now */
+        int rc = send_file(d, sendpath);
+        fwdv_close(d);
+        return rc;
+    }
 
     fwdv_status_t st;
     if (info || (!outpath && cmd < 0 && !play)) {

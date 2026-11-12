@@ -444,6 +444,12 @@ int dec_finish(decoder_t *d)
     return ok ? 0 : -1;
 }
 
+void dec_abort(decoder_t *d)
+{
+    if (d)
+        kill_child(d);
+}
+
 void dec_stop(decoder_t *d)
 {
     if (!d)

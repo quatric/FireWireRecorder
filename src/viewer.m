@@ -723,6 +723,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     NSMenu *file = [[NSMenu alloc] initWithTitle:@"File"];
     [file addItemWithTitle:@"Start/Stop Recording" action:@selector(toggleRecord:) keyEquivalent:@"r"];
     [file addItemWithTitle:@"Save Snapshot" action:@selector(snapshot:) keyEquivalent:@"s"];
+    [file addItemWithTitle:@"Record File to Tape…" action:@selector(recordToTape:) keyEquivalent:@"t"];
     [file addItem:[NSMenuItem separatorItem]];
     [file addItemWithTitle:@"Choose Recording Folder…" action:@selector(chooseFolder:) keyEquivalent:@""];
     [file addItemWithTitle:@"Show Recordings in Finder" action:@selector(revealFolder:) keyEquivalent:@""];
@@ -910,6 +911,12 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     }
     if (item.action == @selector(snapshot:))
         return app_state(g_app) == APP_STREAMING && app_preview(g_app);
+    if (item.action == @selector(recordToTape:)) {
+        BOOL sending = app_send_peek(g_app);
+        item.title = sending ? @"Cancel Recording to Tape" : @"Record File to Tape…";
+        app_state_t st = app_state(g_app);
+        return sending || (!app_is_recording(g_app) && (st == APP_STREAMING || st == APP_NO_SIGNAL));
+    }
     if (item.action == @selector(togglePreview:))
         item.state = app_preview(g_app) ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(tapeButton:))
@@ -1118,8 +1125,62 @@ static CVReturn display_link_cb(CVDisplayLinkRef link, const CVTimeStamp *now, c
     } else {
         s = @"Finishing the file…";
     }
+    char smsg[300];
+    int sst = app_send_status(g_app, NULL, smsg, sizeof(smsg));
+    if (sst == 1) {
+        s = [NSString stringWithUTF8String:smsg];
+        _preview.badge.stringValue = @"● TAPE";
+    } else if (sst) {
+        _savedMessage = [NSString stringWithUTF8String:smsg];
+        _savedUntil = [NSDate dateWithTimeIntervalSinceNow:8];
+        if (sst < 0) {
+            NSAlert *e = [NSAlert new];
+            e.messageText = @"Recording onto the tape stopped";
+            e.informativeText = _savedMessage;
+            [e beginSheetModalForWindow:_window completionHandler:nil];
+        }
+    }
     [self setStatus:s];
     [_preview setNeedsLayout:YES];
+}
+
+/* ---- recording a video file onto the camcorder's tape ---- */
+
+- (void)recordToTape:(id)sender
+{
+    if (app_send_peek(g_app)) {
+        app_send_cancel(g_app);
+        return;
+    }
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseFiles = YES;
+    p.canChooseDirectories = NO;
+    p.message = @"Choose the video to record onto the tape in the camcorder";
+    p.prompt = @"Choose";
+    [p beginSheetModalForWindow:_window completionHandler:^(NSModalResponse res) {
+        if (res != NSModalResponseOK)
+            return;
+        NSAlert *a = [NSAlert new];
+        a.messageText = @"Record this video onto the tape?";
+        a.informativeText = [NSString stringWithFormat:
+            @"“%@” will be converted to DV and recorded onto the tape in the camcorder, starting at the tape's "
+            @"current position, and it will record over what is there. The camcorder must be in VCR mode with a "
+            @"tape that is not write-protected. The video is letterboxed to 4:3.",
+            p.URL.lastPathComponent];
+        [a addButtonWithTitle:@"Record onto Tape"];
+        [a addButtonWithTitle:@"Cancel"];
+        [a beginSheetModalForWindow:self->_window completionHandler:^(NSModalResponse r) {
+            if (r != NSAlertFirstButtonReturn)
+                return;
+            char err[300] = "";
+            if (app_send_start(g_app, p.URL.fileSystemRepresentation, err, sizeof(err))) {
+                NSAlert *e = [NSAlert new];
+                e.messageText = @"Cannot record onto the tape";
+                e.informativeText = [NSString stringWithUTF8String:err];
+                [e beginSheetModalForWindow:self->_window completionHandler:nil];
+            }
+        }];
+    }];
 }
 
 /* ---- snapshot ---- */

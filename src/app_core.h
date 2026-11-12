@@ -99,6 +99,17 @@ void app_stop_after_label(int minutes, char *buf, int buflen);
  * position), or -1. */
 int app_stop_after_from_index(int index);
 
+/* ---- recording a video file onto the camcorder's tape (macOS) ----
+ * Any file ffmpeg can read is converted to DV (letterboxed to 4:3, in the standard of the tape last
+ * seen: NTSC unless the camcorder played PAL) and sent to the camcorder, which records it from the
+ * tape's current position. It runs in the background: poll app_send_status. */
+int app_send_supported(void);
+int app_send_start(app_t *a, const char *file, char *err, int errlen);
+void app_send_cancel(app_t *a);
+int app_send_peek(app_t *a); /* 1 while a recording onto the tape is running; changes nothing */
+/* 0 idle, 1 sending (msg: progress), 2 finished, -1 failed (msg says why). 2 and -1 are reported once. */
+int app_send_status(app_t *a, double *seconds, char *msg, int len);
+
 /* Saves the current picture as a square-pixel PNG (needs the preview on). */
 int app_snapshot(app_t *a, const char *folder, char *path, int pathlen, char *err, int errlen);
 

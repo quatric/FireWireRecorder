@@ -43,12 +43,12 @@ FEATURES="--disable-everything --disable-autodetect --disable-doc --disable-debu
   --disable-ffplay --disable-ffprobe --disable-avdevice --enable-static --disable-shared
   --enable-swscale --enable-swresample
   --enable-protocol=file,pipe
-  --enable-demuxer=dv,mpegts
-  --enable-parser=mpegvideo,mpegaudio
-  --enable-decoder=dvvideo,pcm_s16le,mpeg2video,mp2,mp2float
-  --enable-encoder=rawvideo,pcm_s16le,pcm_s16be,mpeg2video,mp2,aac
-  --enable-muxer=rawvideo,pcm_s16le,pcm_s16be,mpeg2dvd,mp4
-  --enable-filter=yadif,scale,format,null,anull,aformat,aresample"
+  --enable-demuxer=dv,mpegts,mpegps,mov,avi,matroska,mp3,wav,aac,flac,ac3,h264
+  --enable-parser=mpegvideo,mpegaudio,h264,hevc,mpeg4video,aac,ac3,flac,vorbis
+  --enable-decoder=dvvideo,pcm_s16le,mpeg2video,mp2,mp2float,mpeg1video,mpeg4,h264,hevc,aac,mp3,mp3float,ac3,flac,vorbis,pcm_s16be,pcm_u8,pcm_s24le,pcm_f32le
+  --enable-encoder=rawvideo,pcm_s16le,pcm_s16be,mpeg2video,mp2,aac,dvvideo
+  --enable-muxer=rawvideo,pcm_s16le,pcm_s16be,mpeg2dvd,mp4,dv
+  --enable-filter=yadif,scale,format,null,anull,aformat,aresample,pad,setsar,fps"
 
 # x264 for each target: X264_HOST is its --host, X264_ENV its compiler settings
 X264_FLAGS=

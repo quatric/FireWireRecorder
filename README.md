@@ -21,6 +21,12 @@ and the preview, the sound and all three recording formats follow; MPEG-2 and x2
 picture (DVD size and full 1080 resolution respectively). On Windows, HDV is not supported yet. HDV is
 untested on a device.
 
+**Record to tape** (macOS, experimental): File → Record File to Tape… (⌘T) sends any video file ffmpeg can read
+back to the camcorder, which records it from the tape's current position, over what is there; the camcorder
+must be in VCR mode with a tape that is not write-protected. The video is converted to DV and letterboxed
+to 4:3, in the standard (NTSC or PAL) of the last tape played. On the command line,
+`fwdv-capture --send file.dv` records a raw DV file the same way. This has not been tried on a camcorder yet.
+
 Status: tested on macOS 10.9.5 (Intel) with a Sony DCR-HC21 (NTSC): live preview, tape control,
 timecode, and recording in all three formats; the PowerPC/i386 legacy build's capture was tested on
 the same Mac. **The Windows and Linux builds have not been tested on a device yet.** PAL (625/50)
@@ -71,6 +77,7 @@ fwdv-capture --rewind                         # tape commands on their own
 | `--play` | start the tape first, and stop it again at the end |
 | `--until-stop` | record until the tape stops (end of tape or recording) |
 | `--stop`, `--pause`, `--rewind`, `--ffwd` | tape commands |
+| `--send FILE` | record a raw DV file onto the tape (macOS) |
 | `--info` | print the device, tape state and timecode |
 | `-v`, `-vv` | log what happens on the bus |
 

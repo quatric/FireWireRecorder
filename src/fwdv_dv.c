@@ -119,6 +119,8 @@ int avc_cmd_bytes(fwdv_cmd_t cmd, uint8_t out[8])
     case FWDV_STOP: out[2] = 0xc4, out[3] = 0x60; break;         /* WIND stop */
     case FWDV_REWIND: out[2] = 0xc4, out[3] = 0x65; break;       /* WIND rewind */
     case FWDV_FFWD: out[2] = 0xc4, out[3] = 0x75; break;         /* WIND fast forward */
+    case FWDV_RECORD: out[2] = 0xc2, out[3] = 0x75; break;       /* RECORD */
+    case FWDV_RECORD_PAUSE: out[2] = 0xc2, out[3] = 0x7d; break; /* RECORD pause */
     default: return 0;
     }
     return 4;
@@ -174,3 +176,67 @@ void avc_parse_medium(const uint8_t *r, int n, fwdv_status_t *st)
     if (n >= 5 && r[0] == 0x0c)
         st->has_tape = r[3] != 0x60;
 }
+
+/* ---- sending: DV frame -> CIP packets ---- */
+
+#define TICKS_PER_CYCLE 3072.0
+
+void dv_tx_init(dv_tx_t *t, int pal, uint32_t start_cycle)
+{
+    memset(t, 0, sizeof(*t));
+    t->pal = pal;
+    t->npkt = pal ? 300 : 250; /* 6 DIF blocks of 80 bytes each: 1500 or 1800 blocks per frame */
+    t->step = pal ? 24576000.0 / 25 / 300 : 24576000.0 * 1001 / 30000 / 250;
+    t->cycle = start_cycle;
+    t->next_pt = ((double)start_cycle + DV_TX_AHEAD + 1) * TICKS_PER_CYCLE;
+}
+
+int dv_tx_packet(dv_tx_t *t, uint8_t *out)
+{
+    double now = (double)t->cycle++ * TICKS_PER_CYCLE;
+    int data = 0;
+    if (t->frame) {
+        if (t->idx == 0 && t->next_pt < now + (DV_TX_AHEAD - 2) * TICKS_PER_CYCLE)
+            t->next_pt = now + (DV_TX_AHEAD + 1) * TICKS_PER_CYCLE; /* late (or just started): re-time */
+        data = now + DV_TX_AHEAD * TICKS_PER_CYCLE >= t->next_pt;
+    }
+    uint32_t syt = 0xffff;
+    if (data) {
+        uint64_t pt = (uint64_t)t->next_pt;
+        syt = (uint32_t)((pt / 3072 & 15) << 12 | pt % 3072);
+    }
+    out[0] = 0; /* source node: not needed by the camcorders */
+    out[1] = 0x78; /* 120 quadlets per data block */
+    out[2] = 0;
+    out[3] = t->dbc;
+    out[4] = 0x80; /* EOH1, FMT 0: DV */
+    out[5] = t->pal ? 0x80 : 0x00; /* 50/60 */
+    out[6] = (uint8_t)(syt >> 8);
+    out[7] = (uint8_t)syt;
+    if (!data)
+        return 8;
+    memcpy(out + 8, t->frame + (size_t)t->idx * 480, 480);
+    t->dbc++;
+    t->next_pt += t->step;
+    if (++t->idx == t->npkt) {
+        t->idx = 0;
+        t->frame = NULL;
+        t->frame_done = 1;
+    }
+    return 488;
+}
+
+#if !defined(__APPLE__) || defined(LEGACY_MAC)
+int fwdv_send_start(fwdv_t *d, int pal) { (void)d, (void)pal; return FWDV_ERR_UNSUPPORTED; }
+int fwdv_send_frame(fwdv_t *d, const uint8_t *frame, size_t len, volatile int *abort)
+{
+    (void)d, (void)frame, (void)len, (void)abort;
+    return FWDV_ERR_UNSUPPORTED;
+}
+void fwdv_send_stop(fwdv_t *d, int drain) { (void)d, (void)drain; }
+void fwdv_send_stats(fwdv_t *d, uint64_t *queued, uint64_t *sent)
+{
+    (void)d;
+    *queued = *sent = 0;
+}
+#endif

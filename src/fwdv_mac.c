@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* the 10.4u SDK's DCLCallProc has a plain UInt32 procData */
@@ -59,7 +60,27 @@ struct fwdv {
     IOFireWireLibRemoteIsochPortRef rport;
     IOFireWireLibIsochChannelRef chan;
     dv_assembler_t as;
+
+    /* transmit (recording onto the tape) */
+#ifndef LEGACY_MAC
+    pthread_t tx_thread;
+    int tx_running, tx_result, tx_pal, tx_started;
+    pthread_mutex_t tx_lock;
+    pthread_cond_t tx_cv;
+    uint8_t *tx_q;       /* TXQ frames, a ring */
+    int tx_head, tx_count, tx_draining;
+    uint64_t tx_queued, tx_sent;
+    dv_tx_t tx;
+    int tx_cur_slot;     /* the queue slot the packetizer is reading, or -1 */
+    int tx_start_cycle, tx_connected;
+    UInt16 tx_sizes[NPKT];
+    DCLCallProc tx_calls[NPKT / GROUP];
+#endif
 };
+
+#define TXQ 24      /* frames waiting to go out: 0.8 s */
+#define TXCHAN 1    /* the isochronous channel the camcorder listens on */
+#define TXSZ 512    /* one cycle's packet: 8 CIP + 480 */
 
 static fwdv_t *g_rx; /* the remote port's callbacks have no refcon on 10.3 */
 
@@ -331,6 +352,12 @@ static int find_channel(fwdv_t *d)
 
 static void teardown(fwdv_t *d)
 {
+#ifndef LEGACY_MAC
+    if (d->tx_connected) {
+        (*d->avc)->breakP2PInputConnection(d->avc, 0);
+        d->tx_connected = 0;
+    }
+#endif
     if (d->chan) {
         (*d->chan)->Stop(d->chan);
         (*d->chan)->ReleaseChannel(d->chan);
@@ -484,3 +511,249 @@ void fwdv_stop(fwdv_t *d)
     free(d->bufs);
     d->bufs = NULL;
 }
+
+/* ---- isochronous transmit: recording a file onto the camcorder's tape ---- */
+
+#ifndef LEGACY_MAC
+
+/* Produces the next cycle's packet into slot i of the ring. Called with tx_lock held. */
+static void tx_fill(fwdv_t *d, int i)
+{
+    if (!d->tx.frame && d->tx_count > 0) {
+        d->tx_cur_slot = d->tx_head;
+        d->tx.frame = d->tx_q + (size_t)d->tx_head * DV_FRAME_625;
+    }
+    uint8_t *buf = d->bufs + (size_t)i * PKTSZ;
+    int n = dv_tx_packet(&d->tx, buf);
+    d->tx_sizes[i] = (UInt16)n;
+    if (d->tx.frame_done) { /* the frame is entirely in packets: its slot is free again */
+        d->tx.frame_done = 0;
+        d->tx_head = (d->tx_head + 1) % TXQ;
+        d->tx_count--;
+        d->tx_sent++;
+        pthread_cond_broadcast(&d->tx_cv);
+    }
+}
+
+static void tx_group(DCLCommand *cmd)
+{
+    fwdv_t *d = g_rx;
+    if (!d)
+        return;
+    long g = (long)((DCLCallProc *)cmd)->procData;
+    pthread_mutex_lock(&d->tx_lock);
+    for (int i = 0; i < GROUP; i++) {
+        int slot = (int)(g * GROUP + i);
+        tx_fill(d, slot);
+        (*d->lport)->ModifyTransferPacketDCLSize(d->lport, &d->xfer[slot], d->tx_sizes[slot]);
+    }
+    pthread_mutex_unlock(&d->tx_lock);
+}
+
+static int tx_setup(fwdv_t *d)
+{
+    d->dev = (IOFireWireLibDeviceRef)(*d->avc)->getAncestorInterface(
+        d->avc, "IOFireWireDevice", CFUUIDGetUUIDBytes(kIOFireWireLibTypeID),
+        CFUUIDGetUUIDBytes(kIOFireWireDeviceInterfaceID));
+    if (!d->dev)
+        return FWDV_ERR_IO;
+    IOReturn e = (*d->dev)->OpenWithSessionRef(d->dev, (*d->avc)->getSessionRef(d->avc));
+    if (e) {
+        (*d->dev)->Release(d->dev);
+        d->dev = NULL;
+        return e == kIOReturnExclusiveAccess ? FWDV_ERR_BUSY : FWDV_ERR_IO;
+    }
+    (*d->dev)->AddCallbackDispatcherToRunLoop(d->dev, d->loop);
+    (*d->dev)->AddIsochCallbackDispatcherToRunLoop(d->dev, d->loop);
+    d->channel = TXCHAN;
+
+    /* start the DMA on a bus cycle ahead of now, and count our packets from that cycle, so the time
+     * stamps in them line up with the bus's cycle timer */
+    UInt32 ct = 0;
+    (*d->dev)->GetCycleTime(d->dev, &ct);
+    int start = (int)(((ct >> 12 & 0x1fff) + 1000) % 8000);
+    dv_tx_init(&d->tx, d->tx_pal, (uint32_t)start);
+    d->tx_cur_slot = -1;
+
+    pthread_mutex_lock(&d->tx_lock);
+    DCLCommand *prev = (DCLCommand *)&d->label;
+    memset(&d->label, 0, sizeof(d->label));
+    d->label.opcode = kDCLLabelOp;
+    DCLSetTagSyncBits *tag = calloc(1, sizeof(*tag)); /* tag 1: CIP-formatted data */
+    tag->opcode = kDCLSetTagSyncBitsOp;
+    tag->tagBits = 1;
+    tag->syncBits = 0;
+    prev->pNextDCLCommand = (DCLCommand *)tag;
+    prev = (DCLCommand *)tag;
+    for (int i = 0; i < NPKT; i++) {
+        tx_fill(d, i);
+        DCLTransferPacket *x = &d->xfer[i];
+        memset(x, 0, sizeof(*x));
+        x->opcode = kDCLSendPacketStartOp;
+        x->buffer = d->bufs + (size_t)i * PKTSZ;
+        x->size = d->tx_sizes[i];
+        prev->pNextDCLCommand = (DCLCommand *)x;
+        prev = (DCLCommand *)x;
+        if ((i + 1) % GROUP == 0) {
+            DCLCallProc *c = &d->tx_calls[i / GROUP];
+            memset(c, 0, sizeof(*c));
+            c->opcode = kDCLCallProcOp;
+            c->proc = tx_group;
+            c->procData = (procdata_t)(long)(i / GROUP);
+            prev->pNextDCLCommand = (DCLCommand *)c;
+            prev = (DCLCommand *)c;
+        }
+    }
+    pthread_mutex_unlock(&d->tx_lock);
+    memset(&d->jump, 0, sizeof(d->jump));
+    d->jump.opcode = kDCLJumpOp;
+    d->jump.pJumpDCLLabel = &d->label;
+    prev->pNextDCLCommand = (DCLCommand *)&d->jump;
+
+    IOVirtualRange br = { (IOVirtualAddress)d->bufs, NPKT * PKTSZ };
+    d->lport = (*d->dev)->CreateLocalIsochPort(d->dev, true, (DCLCommand *)&d->label, kFWDCLCycleEvent, start, 0x1fff,
+                                               NULL, 0, &br, 1,
+                                               CFUUIDGetUUIDBytes(kIOFireWireLocalIsochPortInterfaceID));
+    d->rport = (*d->dev)->CreateRemoteIsochPort(d->dev, false, CFUUIDGetUUIDBytes(kIOFireWireRemoteIsochPortInterfaceID));
+    d->chan = (*d->dev)->CreateIsochChannel(d->dev, true, 488, kFWSpeed100MBit,
+                                            CFUUIDGetUUIDBytes(kIOFireWireIsochChannelInterfaceID));
+    free(tag);
+    if (!d->lport || !d->rport || !d->chan)
+        return FWDV_ERR_IO;
+    (*d->rport)->SetGetSupportedHandler(d->rport, rp_supported);
+    (*d->rport)->SetAllocatePortHandler(d->rport, rp_alloc);
+    (*d->rport)->SetReleasePortHandler(d->rport, rp_ok);
+    (*d->rport)->SetStartHandler(d->rport, rp_ok);
+    (*d->rport)->SetStopHandler(d->rport, rp_ok);
+    if ((e = (*d->chan)->SetTalker(d->chan, (IOFireWireLibIsochPortRef)d->lport)) ||
+        (e = (*d->chan)->AddListener(d->chan, (IOFireWireLibIsochPortRef)d->rport)) ||
+        (e = (*d->chan)->AllocateChannel(d->chan))) {
+        if (fwdv_verbose)
+            fprintf(stderr, "fwdv: isochronous transmit setup failed: %08x\n", e);
+        return FWDV_ERR_IO;
+    }
+    /* tell the camcorder's input plug which channel to listen to, then start sending */
+    if ((e = (*d->avc)->makeP2PInputConnection(d->avc, 0, TXCHAN))) {
+        if (fwdv_verbose)
+            fprintf(stderr, "fwdv: connecting the input plug failed: %08x\n", e);
+        return FWDV_ERR_IO;
+    }
+    d->tx_connected = 1;
+    if ((e = (*d->chan)->Start(d->chan))) {
+        if (fwdv_verbose)
+            fprintf(stderr, "fwdv: starting the transmit failed: %08x\n", e);
+        return FWDV_ERR_IO;
+    }
+    if (fwdv_verbose)
+        fprintf(stderr, "fwdv: sending on channel %d from cycle %d\n", TXCHAN, start);
+    return FWDV_OK;
+}
+
+static void *tx_thread_main(void *arg)
+{
+    fwdv_t *d = arg;
+    d->loop = CFRunLoopGetCurrent();
+    int r = tx_setup(d);
+    pthread_mutex_lock(&d->lock);
+    d->tx_result = r;
+    d->tx_running = r == FWDV_OK;
+    pthread_cond_broadcast(&d->cv);
+    pthread_mutex_unlock(&d->lock);
+    if (r == FWDV_OK)
+        while (d->tx_running)
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+    teardown(d);
+    return NULL;
+}
+
+int fwdv_send_start(fwdv_t *d, int pal)
+{
+    if (d->thread || d->tx_thread)
+        return FWDV_ERR_BUSY; /* receiving: fwdv_stop first */
+    if (!d->tx_q && !(d->tx_q = calloc(TXQ, DV_FRAME_625)))
+        return FWDV_ERR_IO;
+    if (!d->bufs && !(d->bufs = calloc(NPKT, PKTSZ)))
+        return FWDV_ERR_IO;
+    pthread_mutex_init(&d->tx_lock, NULL);
+    pthread_cond_init(&d->tx_cv, NULL);
+    d->tx_head = d->tx_count = d->tx_draining = 0;
+    d->tx_queued = d->tx_sent = 0;
+    d->tx_pal = pal != 0;
+    d->tx_result = 1;
+    g_rx = d;
+    if (pthread_create(&d->tx_thread, NULL, tx_thread_main, d)) {
+        d->tx_thread = 0;
+        return FWDV_ERR_IO;
+    }
+    pthread_mutex_lock(&d->lock);
+    while (d->tx_result == 1)
+        pthread_cond_wait(&d->cv, &d->lock);
+    int r = d->tx_result;
+    pthread_mutex_unlock(&d->lock);
+    if (r) {
+        pthread_join(d->tx_thread, NULL);
+        d->tx_thread = 0;
+        g_rx = NULL;
+    }
+    return r;
+}
+
+int fwdv_send_frame(fwdv_t *d, const uint8_t *frame, size_t len, volatile int *abort)
+{
+    if (!d->tx_thread || (len != DV_FRAME_525 && len != DV_FRAME_625))
+        return FWDV_ERR_UNSUPPORTED;
+    if ((len == DV_FRAME_625) != d->tx_pal)
+        return FWDV_ERR_UNSUPPORTED; /* the stream's standard cannot change in the middle */
+    pthread_mutex_lock(&d->tx_lock);
+    while (d->tx_count == TXQ && d->tx_running && !(abort && *abort)) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        long ns = tv.tv_usec * 1000 + 100 * 1000000;
+        struct timespec ts = { tv.tv_sec + ns / 1000000000, ns % 1000000000 };
+        pthread_cond_timedwait(&d->tx_cv, &d->tx_lock, &ts);
+    }
+    int ok = d->tx_count < TXQ && d->tx_running;
+    if (ok) {
+        memcpy(d->tx_q + (size_t)((d->tx_head + d->tx_count) % TXQ) * DV_FRAME_625, frame, len);
+        d->tx_count++;
+        d->tx_queued++;
+    }
+    pthread_mutex_unlock(&d->tx_lock);
+    return ok ? FWDV_OK : FWDV_ERR_GONE;
+}
+
+void fwdv_send_stop(fwdv_t *d, int drain)
+{
+    if (!d->tx_thread)
+        return;
+    if (drain) { /* let the queue play out (and the ring: about 0.2 s more) */
+        for (int i = 0; i < 300; i++) {
+            pthread_mutex_lock(&d->tx_lock);
+            int left = d->tx_count;
+            pthread_mutex_unlock(&d->tx_lock);
+            if (!left)
+                break;
+            usleep(100000);
+        }
+        usleep(400000);
+    }
+    d->tx_running = 0;
+    if (d->loop)
+        CFRunLoopStop(d->loop);
+    pthread_join(d->tx_thread, NULL);
+    d->tx_thread = 0;
+    d->loop = NULL;
+    g_rx = NULL;
+    free(d->bufs);
+    d->bufs = NULL;
+    free(d->tx_q);
+    d->tx_q = NULL;
+}
+
+void fwdv_send_stats(fwdv_t *d, uint64_t *queued, uint64_t *sent)
+{
+    *queued = d->tx_queued;
+    *sent = d->tx_sent;
+}
+
+#endif /* !LEGACY_MAC */

@@ -112,6 +112,13 @@ struct app {
     int rec_pal;
     char rec_path[1024];
     volatile int auto_stop, auto_stop_due;
+    /* recording onto the tape */
+    pthread_t send_thread;
+    volatile int sending, send_abort, send_result; /* result: 0 none yet, 1 finished, -1 failed */
+    volatile uint64_t send_frames;
+    int send_pal, send_joinable;
+    char send_msg[256], send_path[1024];
+    decoder_t *send_dec;
 
     pthread_mutex_t frame_lock;
     uint32_t *rgb;            /* the frame on screen */
@@ -695,6 +702,11 @@ void app_close(app_t *a)
     pthread_mutex_unlock(&a->data_lock);
     if (rec || enc)
         finish_recording(rec, f, enc);
+    a->send_abort = 1;
+    if (a->send_joinable) {
+        pthread_join(a->send_thread, NULL);
+        a->send_joinable = 0;
+    }
     pthread_mutex_lock(&a->lock);
     a->quit = 1;
     pthread_cond_broadcast(&a->cv);
@@ -1008,6 +1020,179 @@ void app_set_setting_int(const char *key, int v)
     char s[32];
     snprintf(s, sizeof(s), "%d", v);
     app_set_setting_str(key, s);
+}
+
+/* ---- recording onto the tape ---- */
+
+int app_send_supported(void)
+{
+#if defined(__APPLE__) && !defined(LEGACY_MAC)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+static void send_fail(app_t *a, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void send_fail(app_t *a, const char *fmt, ...)
+{
+    va_list ap;
+    pthread_mutex_lock(&a->lock);
+    va_start(ap, fmt);
+    vsnprintf(a->send_msg, sizeof(a->send_msg), fmt, ap);
+    va_end(ap);
+    a->send_result = -1;
+    pthread_mutex_unlock(&a->lock);
+}
+
+static void on_send_frame(const uint8_t *data, size_t len, void *user)
+{
+    app_t *a = user;
+    if (a->send_abort) { /* cancelled: stop ffmpeg converting the rest of the file */
+        dec_abort(a->send_dec);
+        return;
+    }
+    int r = fwdv_send_frame(a->dev, data, len, &a->send_abort);
+    if (r) {
+        if (!a->send_abort)
+            send_fail(a, "Sending stopped: %s", fwdv_strerror(r));
+        a->send_abort = 1;
+        return;
+    }
+    uint64_t n = ++a->send_frames;
+    if (n == 15) { /* the stream is running: tell the tape to record it */
+        pthread_mutex_lock(&a->dev_lock);
+        int rr = fwdv_transport(a->dev, FWDV_RECORD);
+        pthread_mutex_unlock(&a->dev_lock);
+        if (rr) {
+            send_fail(a, "The camcorder would not start recording (%s). Is a tape that can be recorded in, in VCR mode?",
+                      fwdv_strerror(rr));
+            a->send_abort = 1;
+        }
+    }
+}
+
+static void *send_main(void *arg)
+{
+    app_t *a = arg;
+    fwdv_t *dev = a->dev;
+    int pal = a->send_pal;
+    pthread_mutex_lock(&a->dev_lock);
+    fwdv_stop(dev); /* no receiving while sending */
+    int r = fwdv_send_start(dev, pal);
+    pthread_mutex_unlock(&a->dev_lock);
+    if (r) {
+        send_fail(a, "Cannot send to the camcorder: %s", fwdv_strerror(r));
+    } else {
+        const char *W = pal ? "768" : "640", *H = pal ? "576" : "480";
+        char vf[400];
+        snprintf(vf, sizeof(vf),
+                 "scale=trunc(iw*sar):ih,setsar=1,scale=%s:%s:force_original_aspect_ratio=decrease,"
+                 "pad=%s:%s:(ow-iw)/2:(oh-ih)/2,scale=720:%s,setsar=%s,fps=%s,format=%s",
+                 W, H, W, H, pal ? "576" : "480", pal ? "16/15" : "8/9", pal ? "25" : "30000/1001",
+                 pal ? "yuv420p" : "yuv411p");
+        const char *args[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-i", a->send_path,
+                               "-map", "0:v:0", "-map", "0:a:0?", "-vf", vf, "-c:v", "dvvideo",
+                               "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "dv", "pipe:1", NULL };
+        char err[300] = "";
+        decoder_t *enc = dec_start(args, pal ? DV_FRAME_625 : DV_FRAME_525, on_send_frame, a, err, sizeof(err));
+        if (!enc) {
+            send_fail(a, "Cannot start ffmpeg: %s", err);
+        } else {
+            a->send_dec = enc;
+            int ok = dec_finish(enc) == 0; /* ffmpeg ends by itself when the file does; a cancel kills it */
+            a->send_dec = NULL;
+            if (!a->send_result && !ok && !a->send_abort)
+                send_fail(a, "ffmpeg could not convert %s", a->send_path);
+        }
+        pthread_mutex_lock(&a->dev_lock);
+        fwdv_send_stop(dev, !a->send_abort && !a->send_result);
+        fwdv_transport(dev, FWDV_STOP);
+        pthread_mutex_unlock(&a->dev_lock);
+    }
+    /* back to watching the camcorder */
+    pthread_mutex_lock(&a->dev_lock);
+    if (a->dev == dev && !a->quit) {
+        a->hdv = 0;
+        fwdv_set_ts_handler(on_ts, a);
+        fwdv_start(dev, on_frame, a);
+    }
+    pthread_mutex_unlock(&a->dev_lock);
+    pthread_mutex_lock(&a->lock);
+    if (!a->send_result)
+        a->send_result = 1;
+    a->sending = 0;
+    pthread_mutex_unlock(&a->lock);
+    return NULL;
+}
+
+int app_send_start(app_t *a, const char *file, char *err, int errlen)
+{
+    if (!app_send_supported()) {
+        snprintf(err, (size_t)errlen, "Recording onto the tape is only available on macOS for now.");
+        return -1;
+    }
+    pthread_mutex_lock(&a->lock);
+    int busy = a->sending, have = a->dev != NULL;
+    pthread_mutex_unlock(&a->lock);
+    if (busy) {
+        snprintf(err, (size_t)errlen, "Already recording onto the tape.");
+        return -1;
+    }
+    if (!have) {
+        snprintf(err, (size_t)errlen, "No camcorder is connected.");
+        return -1;
+    }
+    if (app_is_recording(a)) {
+        snprintf(err, (size_t)errlen, "Stop the recording to a file first.");
+        return -1;
+    }
+    if (a->send_joinable) {
+        pthread_join(a->send_thread, NULL);
+        a->send_joinable = 0;
+    }
+    snprintf(a->send_path, sizeof(a->send_path), "%s", file);
+    a->send_pal = a->pal;
+    a->send_abort = 0;
+    a->send_frames = 0;
+    a->send_msg[0] = 0;
+    a->send_result = 0;
+    a->sending = 1;
+    if (pthread_create(&a->send_thread, NULL, send_main, a)) {
+        a->sending = 0;
+        snprintf(err, (size_t)errlen, "out of memory");
+        return -1;
+    }
+    a->send_joinable = 1;
+    return 0;
+}
+
+void app_send_cancel(app_t *a) { a->send_abort = 1; }
+
+int app_send_peek(app_t *a) { return a->sending; }
+
+int app_send_status(app_t *a, double *seconds, char *msg, int len)
+{
+    pthread_mutex_lock(&a->lock);
+    int st = 0;
+    double s = (double)a->send_frames * (a->send_pal ? 1.0 / 25 : 1001.0 / 30000);
+    if (a->sending) {
+        st = 1;
+        snprintf(msg, (size_t)len, "Recording onto the tape: %d:%02d sent", (int)s / 60, (int)s % 60);
+    } else if (a->send_result) {
+        st = a->send_result;
+        if (st > 0)
+            snprintf(msg, (size_t)len, "Finished recording onto the tape (%d:%02d)", (int)s / 60, (int)s % 60);
+        else
+            snprintf(msg, (size_t)len, "%s", a->send_msg);
+        a->send_result = 0;
+    } else {
+        msg[0] = 0;
+    }
+    if (seconds)
+        *seconds = s;
+    pthread_mutex_unlock(&a->lock);
+    return st;
 }
 
 /* ---- recording ---- */
