@@ -1104,8 +1104,10 @@ static CVReturn display_link_cb(CVDisplayLinkRef link, const CVTimeStamp *now, c
     char shot[32];
     app_tape_datetime(g_app, shot, sizeof(shot));
     NSString *shotText = [NSString stringWithUTF8String:shot];
-    if (![_dateLabel.stringValue isEqualToString:shotText])
+    if (![_dateLabel.stringValue isEqualToString:shotText]) {
         _dateLabel.stringValue = shotText;
+        [_bar refit]; /* the label starts empty, so it has no width until the bar is laid out again */
+    }
 
     if (rec && !_finishing && app_auto_stop_due(g_app))
         [self stopRecording]; /* "Stop at end of tape" */
