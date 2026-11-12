@@ -36,6 +36,11 @@ const char *fwdv_strerror(int r);
 /* Called on the receive thread with each complete frame. */
 typedef void (*fwdv_frame_cb)(const uint8_t *frame, size_t len, void *user);
 
+/* HDV camcorders send an MPEG-2 transport stream (IEC 61883-4) instead of DV frames: it arrives
+ * here, in chunks of whole 188-byte TS packets, through this handler (set before fwdv_start). */
+typedef void (*fwdv_ts_cb)(const uint8_t *ts, size_t len, void *user);
+void fwdv_set_ts_handler(fwdv_ts_cb cb, void *user);
+
 int fwdv_open(fwdv_t **out);
 void fwdv_close(fwdv_t *d);
 /* The device's name, e.g. "Sony DCR-HC21". */
@@ -75,6 +80,8 @@ typedef struct {
     uint64_t frames, dropped;
     fwdv_frame_cb cb;
     void *user;
+    uint8_t ts[188 * 40]; /* HDV: TS packets waiting to be handed over */
+    int ts_len;
 } dv_assembler_t;
 
 /* p: an isochronous packet's payload starting at its CIP header, n bytes */

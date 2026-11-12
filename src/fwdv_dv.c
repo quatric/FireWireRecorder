@@ -7,6 +7,15 @@
 
 int fwdv_verbose;
 
+static fwdv_ts_cb g_ts_cb;
+static void *g_ts_user;
+
+void fwdv_set_ts_handler(fwdv_ts_cb cb, void *user)
+{
+    g_ts_cb = cb;
+    g_ts_user = user;
+}
+
 void fwdv_set_verbose(int level) { fwdv_verbose = level; }
 
 const char *fwdv_strerror(int r)
@@ -34,6 +43,24 @@ void dv_assemble(dv_assembler_t *a, const uint8_t *p, size_t n)
 {
     if (n < 8)
         return;
+    if ((p[4] & 0x3f) == 0x20) { /* FMT 0x20: MPEG2-TS (HDV), 188-byte packets, usually with a 4-byte time stamp */
+        if (!g_ts_cb)
+            return;
+        size_t sph = p[2] & 0x04 ? 4 : 0, stride = 188 + sph;
+        const uint8_t *q = p + 8;
+        for (size_t o = 0; o + stride <= n - 8; o += stride) {
+            if (q[o + sph] != 0x47) /* not a TS packet: padding or a bus glitch */
+                continue;
+            memcpy(a->ts + a->ts_len, q + o + sph, 188);
+            a->ts_len += 188;
+            if (a->ts_len + 188 > (int)sizeof(a->ts)) {
+                g_ts_cb(a->ts, (size_t)a->ts_len, g_ts_user);
+                a->frames++;
+                a->ts_len = 0;
+            }
+        }
+        return;
+    }
     /* FMT 0 is DV; DBS is 120 quadlets */
     if ((p[4] & 0x3f) != 0 || p[1] != 0x78)
         return;

@@ -1,6 +1,6 @@
 /*
  * fwdv-capture: record DV from a FireWire camcorder or deck, frame for frame
- * as it is on the tape (a raw .dv file).
+ * as it is on the tape (a raw .dv file); HDV comes out as its MPEG-2 transport stream (.m2t).
  *
  *   fwdv-capture -o tape.dv --play --until-stop    play the tape and record it to the end
  *   fwdv-capture -o - | ffplay -f dv -             watch it live
@@ -31,6 +31,7 @@ static FILE *g_out;
 static volatile int g_write_error;
 static volatile long g_frames;
 static volatile time_t g_last_frame;
+static volatile long g_ts_bytes;
 
 static void on_frame(const uint8_t *frame, size_t len, void *user)
 {
@@ -41,11 +42,22 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
     g_last_frame = time(NULL);
 }
 
+/* HDV: the MPEG-2 transport stream as it comes (a .m2t file) */
+static void on_ts(const uint8_t *ts, size_t len, void *user)
+{
+    (void)user;
+    if (g_out && !g_write_error && fwrite(ts, 1, len, g_out) != len)
+        g_write_error = 1;
+    g_ts_bytes += (long)len;
+    g_frames++;
+    g_last_frame = time(NULL);
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [options]\n"
-            "  -o, --output FILE   raw DV file, - for stdout (without -o: only tape commands)\n"
+            "  -o, --output FILE   raw DV (HDV: transport stream) file, - for stdout (without -o: only tape commands)\n"
             "  -t, --time SECONDS  stop recording after this many seconds\n"
             "      --play          start the tape playing first\n"
             "      --until-stop    stop when the tape stops or the picture ends\n"
@@ -146,6 +158,7 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    fwdv_set_ts_handler(on_ts, NULL);
     if ((r = fwdv_start(d, on_frame, NULL))) {
         fprintf(stderr, "fwdv-capture: cannot receive: %s\n", fwdv_strerror(r));
         fwdv_close(d);
@@ -178,7 +191,8 @@ int main(int argc, char **argv)
             break;
         }
         if (g_out != stdout)
-            fprintf(stderr, "\r%ld frames, %.1f MB", g_frames, g_frames * (double)DV_FRAME_525 / 1e6);
+            fprintf(stderr, "\r%ld frames, %.1f MB", g_frames,
+                    g_ts_bytes ? g_ts_bytes / 1e6 : g_frames * (double)DV_FRAME_525 / 1e6);
     }
     fwdv_stop(d);
     if (play) {
@@ -194,6 +208,9 @@ int main(int argc, char **argv)
     fwdv_close(d);
     if (g_out != stdout && fclose(g_out))
         g_write_error = 1;
+    if (g_ts_bytes)
+        fprintf(stderr, "\nfwdv-capture: HDV, %.1f MB%s\n", g_ts_bytes / 1e6, g_write_error ? ", write error" : "");
+    else
     fprintf(stderr, "\nfwdv-capture: %ld frames%s\n", g_frames, g_write_error ? ", write error" : "");
     return g_write_error ? 1 : 0;
 }

@@ -95,9 +95,14 @@ struct app {
     decoder_t *vdec, *adec;
     volatile int stop_after; /* minutes, 0 = no limit */
     volatile int preview;
-    int dec_pal;               /* the format the decoders were started for */
+    int dec_pal;               /* the format the decoders were started for: pal + 2 * hdv */
     int64_t last_frame_ms;
     volatile int pal, wide;    /* of the latest frame */
+    volatile int hdv;          /* the stream is HDV (MPEG-2 transport stream), not DV */
+    volatile int hdv_w, hdv_h; /* its picture size, from the sequence header */
+    uint8_t hdv_tail[8];       /* last bytes of the previous chunk (a start code can straddle chunks) */
+    int rec_hdv;
+    int64_t rec_start_ms;
     /* recording */
     int rec_format;
     sink_t *rec;               /* raw DV */
@@ -268,9 +273,10 @@ static void stop_decoders(app_t *a)
     dec_stop(au);
 }
 
-static int start_video(app_t *a, int pal)
+static int start_video(app_t *a, int key)
 {
-    int w = 720, h = pal ? 576 : 480;
+    int pal = key & 1, hdv = key >> 1;
+    int w = hdv ? 960 : 720, h = hdv ? 540 : pal ? 576 : 480;
     pthread_mutex_lock(&a->frame_lock);
     if (w != a->fw || h != a->fh) {
         uint32_t *n[FRAME_QUEUE + 1];
@@ -300,7 +306,8 @@ static int start_video(app_t *a, int pal)
     snprintf(vf, sizeof(vf), "yadif=mode=send_frame:parity=auto:deint=interlaced,scale=%d:%d,format=" PIX_FMT, a->fw,
              a->fh);
     const char *vargs[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "nobuffer",
-                            "-probesize", "300000", "-analyzeduration", "100000", "-f", "dv", "-i", "pipe:0",
+                            "-probesize", hdv ? "1000000" : "300000", "-analyzeduration", hdv ? "500000" : "100000",
+                            "-f", hdv ? "mpegts" : "dv", "-i", "pipe:0",
                             "-map", "0:v:0", "-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", PIX_FMT,
                             "-flush_packets", "1", "pipe:1", NULL };
     char err[300] = "";
@@ -317,14 +324,16 @@ static int start_video(app_t *a, int pal)
     return 0;
 }
 
-static void start_decoders(app_t *a, int pal)
+static void start_decoders(app_t *a, int key)
 {
     set_problem(a, NULL);
-    a->dec_pal = pal;
-    if (a->preview && start_video(a, pal))
+    a->dec_pal = key;
+    int hdv = key >> 1;
+    if (a->preview && start_video(a, key))
         return;
     const char *aargs[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "nobuffer",
-                            "-probesize", "300000", "-analyzeduration", "100000", "-f", "dv", "-i", "pipe:0",
+                            "-probesize", hdv ? "1000000" : "300000", "-analyzeduration", hdv ? "500000" : "100000",
+                            "-f", hdv ? "mpegts" : "dv", "-i", "pipe:0",
                             "-map", "0:a:0", "-vn", "-sn", "-ac", "2", "-ar", "48000", "-f", PCM_FMT,
                             "-flush_packets", "1", "pipe:1", NULL };
     char err[300] = "";
@@ -357,6 +366,7 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
     app_t *a = user;
     int pal = len == DV_FRAME_625;
     a->pal = pal;
+    a->hdv = 0;
     a->wide = frame_is_wide(frame);
     pthread_mutex_lock(&a->data_lock);
     a->last_frame_ms = now_ms();
@@ -371,6 +381,53 @@ static void on_frame(const uint8_t *frame, size_t len, void *user)
         dec_feed(a->vdec, frame, len);
     if (a->adec)
         dec_feed(a->adec, frame, len);
+    pthread_mutex_unlock(&a->data_lock);
+}
+
+/* HDV: the MPEG-2 video sequence header (00 00 01 B3) says the picture size, the aspect
+ * and the frame rate; 25 and 29.97 frames per second are the 1080i50/60 and 720p25/30 cases. */
+static void hdv_scan(app_t *a, const uint8_t *p, size_t n)
+{
+    uint8_t buf[8 + 188 * 40];
+    if (n > 188 * 40)
+        n = 188 * 40;
+    memcpy(buf, a->hdv_tail, 8);
+    memcpy(buf + 8, p, n);
+    for (size_t i = 0; i + 8 <= n + 8; i++) {
+        if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1 && buf[i + 3] == 0xb3) {
+            int w = buf[i + 4] << 4 | buf[i + 5] >> 4, h = (buf[i + 5] & 15) << 8 | buf[i + 6];
+            int aspect = buf[i + 7] >> 4, rate = buf[i + 7] & 15;
+            if (w >= 640 && h >= 480 && w <= 1920 && h <= 1088) {
+                a->hdv_w = w, a->hdv_h = h;
+                a->pal = rate == 3 || rate == 2;
+                a->wide = aspect == 3 || w * 9 >= h * 15; /* 16:9 is HDV's only shape */
+            }
+        }
+    }
+    memcpy(a->hdv_tail, buf + n, 8);
+}
+
+static void on_ts(const uint8_t *ts, size_t len, void *user)
+{
+    app_t *a = user;
+    if (!a->hdv) {
+        a->hdv = 1;
+        a->hdv_w = 1440, a->hdv_h = 1080;
+        a->wide = 1;
+        memset(a->hdv_tail, 0xff, sizeof(a->hdv_tail));
+    }
+    hdv_scan(a, ts, len);
+    pthread_mutex_lock(&a->data_lock);
+    a->last_frame_ms = now_ms();
+    if (a->rec) {
+        sink_push(a->rec, ts, len);
+    } else if (a->enc) {
+        dec_feed(a->enc, ts, len);
+    }
+    if (a->vdec)
+        dec_feed(a->vdec, ts, len);
+    if (a->adec)
+        dec_feed(a->adec, ts, len);
     pthread_mutex_unlock(&a->data_lock);
 }
 
@@ -503,6 +560,8 @@ static void *worker(void *arg)
         a->last_frame_ms = 0;
         pthread_mutex_unlock(&a->data_lock);
         start_decoders(a, 0);
+        a->hdv = 0;
+        fwdv_set_ts_handler(on_ts, a);
         if ((r = fwdv_start(dev, on_frame, a))) {
             set_state(a, r == FWDV_ERR_BUSY ? APP_BUSY : APP_SEARCHING, "Cannot receive from %s: %s", fwdv_name(dev),
                       fwdv_strerror(r));
@@ -537,17 +596,19 @@ static void *worker(void *arg)
             int recording = a->rec || a->enc;
             pthread_mutex_unlock(&a->data_lock);
             int64_t now = now_ms();
-            int pal = a->pal, streaming = last && now - last < NO_PICTURE_MS;
+            int pal = a->pal, hdv = a->hdv, key = pal | hdv << 1, streaming = last && now - last < NO_PICTURE_MS;
 
-            /* the format changed (a PAL tape in a deck that played NTSC, say): restart the decoders */
-            if (streaming && pal != a->dec_pal) {
+            /* the format changed (a PAL tape in a deck that played NTSC, or HDV instead of DV): restart the decoders */
+            if (streaming && key != a->dec_pal) {
                 stop_decoders(a);
-                start_decoders(a, pal);
+                start_decoders(a, key);
             }
             sync_preview(a);
 
             pthread_mutex_lock(&a->lock);
-            if (streaming)
+            if (streaming && hdv)
+                a->sig_w = a->hdv_w, a->sig_h = a->hdv_h, a->sig_fps = pal ? 25 : 30;
+            else if (streaming)
                 a->sig_w = 720, a->sig_h = pal ? 576 : 480, a->sig_fps = pal ? 25 : 30;
             else
                 a->sig_w = a->sig_h = a->sig_fps = 0;
@@ -556,7 +617,7 @@ static void *worker(void *arg)
             const char *mode = sr ? "" : mode_text(st.mode);
             if (streaming)
                 set_state(a, APP_STREAMING, "%s%s%s", mode, *mode ? " \xe2\x80\x94 " : "",
-                          pal ? "DV PAL 720x576" : "DV NTSC 720x480");
+                          hdv ? (pal ? "HDV 1080i 25" : "HDV 1080i 30") : pal ? "DV PAL 720x576" : "DV NTSC 720x480");
             else if (!sr && st.has_tape == 0 && st.mode != FWDV_MODE_CAMERA)
                 set_state(a, APP_NO_SIGNAL, "No tape in the %s", a->name);
             else
@@ -955,10 +1016,14 @@ static int write_file(void *ctx, const uint8_t *p, size_t n) { return fwrite(p, 
 
 /* MPEG-2 for DVD (interlaced as DV is, bottom field first) and H.264 with x264
  * (deinterlaced, for computers and phones); the DV's 4:3 or 16:9 carries over. */
-static decoder_t *start_encoder(int format, int pal, const char *path, char *err, int errlen)
+static decoder_t *start_encoder(int format, int pal, int hdv, int wide, const char *path, char *err, int errlen)
 {
+    const char *in = hdv ? "mpegts" : "dv";
     if (format == APP_FMT_MPEG2) {
-        const char *args[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "dv", "-i", "pipe:0",
+        /* HDV is scaled down to DVD size, still interlaced */
+        const char *vf = hdv ? (pal ? "scale=720:576:interl=1" : "scale=720:480:interl=1") : "null";
+        const char *args[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-probesize", hdv ? "2000000" : "5000000",
+                               "-f", in, "-i", "pipe:0", "-vf", vf, "-aspect", hdv || wide ? "16:9" : "4:3",
                                "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "mpeg2video", "-pix_fmt", "yuv420p",
                                "-b:v", "8000k", "-maxrate", "9000k", "-bufsize", "1835k", "-g", pal ? "15" : "18",
                                "-bf", "2", "-flags", "+ilme+ildct", "-alternate_scan", "1",
@@ -966,8 +1031,11 @@ static decoder_t *start_encoder(int format, int pal, const char *path, char *err
                                "-f", "dvd", "-y", path, NULL };
         return dec_start_queue(args, 0, NULL, NULL, REC_QUEUE, err, errlen);
     }
-    const char *args[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "dv", "-i", "pipe:0",
-                           "-map", "0:v:0", "-map", "0:a:0?", "-vf", "yadif=mode=send_frame:parity=auto",
+    const char *args[] = { "-hide_banner", "-loglevel", "error", "-nostdin", "-probesize", hdv ? "2000000" : "5000000",
+                           "-f", in, "-i", "pipe:0",
+                           "-map", "0:v:0", "-map", "0:a:0?", "-vf",
+                           hdv ? "yadif=mode=send_frame:parity=auto,scale=trunc(ih*dar/2)*2:ih,setsar=1"
+                               : "yadif=mode=send_frame:parity=auto",
                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                            "-movflags", "+faststart", "-f", "mp4", "-y", path, NULL };
@@ -983,7 +1051,7 @@ int app_record_start(app_t *a, const char *folder, int format, char *path, int p
     if (format < 0 || format >= APP_FORMATS)
         format = APP_FMT_DV;
     make_dir(folder);
-    app_timestamped_path(folder, app_format_ext[format], path, pathlen);
+    app_timestamped_path(folder, format == APP_FMT_DV && a->hdv ? "m2t" : app_format_ext[format], path, pathlen);
     sink_t *s = NULL;
     FILE *f = NULL;
     decoder_t *enc = NULL;
@@ -999,7 +1067,7 @@ int app_record_start(app_t *a, const char *folder, int format, char *path, int p
         }
     } else {
         char e[300] = "";
-        if (!(enc = start_encoder(format, a->pal, path, e, sizeof(e)))) {
+        if (!(enc = start_encoder(format, a->pal, a->hdv, a->wide, path, e, sizeof(e)))) {
             snprintf(err, (size_t)errlen, "Cannot start the encoder: %s", e);
             return -1;
         }
@@ -1011,6 +1079,8 @@ int app_record_start(app_t *a, const char *folder, int format, char *path, int p
     a->rec_format = format;
     a->rec_frames = 0;
     a->rec_pal = a->pal;
+    a->rec_hdv = a->hdv;
+    a->rec_start_ms = now_ms();
     a->auto_stop_due = 0;
     snprintf(a->rec_path, sizeof(a->rec_path), "%s", path);
     pthread_mutex_unlock(&a->data_lock);
@@ -1101,6 +1171,8 @@ double app_record_seconds(app_t *a)
 {
     pthread_mutex_lock(&a->data_lock);
     double s = (a->rec || a->enc) ? a->rec_frames * (a->rec_pal ? 1 / 25.0 : 1001 / 30000.0) : 0;
+    if ((a->rec || a->enc) && a->rec_hdv) /* no frames to count in a transport stream */
+        s = (double)(now_ms() - a->rec_start_ms) / 1000.0;
     pthread_mutex_unlock(&a->data_lock);
     return s;
 }

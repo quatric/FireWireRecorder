@@ -5,7 +5,8 @@ on macOS, Windows and Linux. Plug in a MiniDV or Digital8 camcorder in VCR/playb
 FireWireRecorder shows the picture, runs the tape (rewind, play, pause, stop, fast forward) and
 records what comes over the cable:
 
-- **Raw DV** (`.dv`): the frames exactly as they are on the tape, bit for bit
+- **Raw DV** (`.dv`): the frames exactly as they are on the tape, bit for bit (**HDV** tapes: the MPEG-2
+  transport stream exactly as the camcorder sends it, `.m2t`)
 - **MPEG-2** (`.mpg`): DVD-compatible, interlaced, 8 Mbit/s with MP2 audio
 - **x264** (`.mp4`): deinterlaced H.264 with AAC audio, small and plays anywhere
 
@@ -14,6 +15,11 @@ transport buttons. "Stop at end of tape" ends the recording by itself once the t
 picture goes away. The preview can be switched off (View → Show Preview, or the Preview checkbox)
 to save CPU on slow machines while recording.
 "Stop after" ends a recording by itself after a time you choose (default: no limit): pick 5 minutes up to 3 hours, or type your own (`45`, `90 min`, `2h`, `1:30`).
+
+**HDV** camcorders work too (macOS and Linux): set the camcorder's i.LINK output to HDV (not "DV Conv.")
+and the preview, the sound and all three recording formats follow; MPEG-2 and x264 are made from the HDV
+picture (DVD size and full 1080 resolution respectively). On Windows, HDV is not supported yet. HDV is
+untested on a device.
 
 Status: tested on macOS 10.9.5 (Intel) with a Sony DCR-HC21 (NTSC): live preview, tape control,
 timecode, and recording in all three formats; the PowerPC/i386 legacy build's capture was tested on
