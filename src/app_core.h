@@ -82,7 +82,7 @@ void app_set_auto_stop(app_t *a, int on);
 int app_auto_stop_due(app_t *a);
 /* "Stop after": the choices (minutes; 0 = no limit) and their names, shared by every GUI. The GUI polls
  * app_stop_after_due() and stops the recording itself when it returns 1. */
-#define APP_STOP_AFTERS 9
+#define APP_STOP_AFTERS 14
 extern const int app_stop_after_minutes[APP_STOP_AFTERS];
 extern const char *const app_stop_after_names[APP_STOP_AFTERS];
 void app_set_stop_after(app_t *a, int index);

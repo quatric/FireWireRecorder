@@ -14,7 +14,7 @@ The tape's timecode and state (playing, paused, rewinding, no tape) are shown ne
 transport buttons. "Stop at end of tape" ends the recording by itself once the tape stops or the
 picture goes away. The preview can be switched off (View → Show Preview, or the Preview checkbox)
 to save CPU on slow machines while recording.
-"Stop after" ends a recording by itself after a time you choose (default: no limit): pick 5 minutes up to 3 hours, or type your own (`45`, `90 min`, `2h`, `1:30`).
+"Stop after" ends a recording by itself after a time you choose (default: no limit): pick 5 minutes up to 12 hours (4, 6, 8, 10 and 12 hours match VHS tape lengths), or type your own (`45`, `90 min`, `2h`, `1:30`).
 
 **HDV** camcorders work too (macOS and Linux): set the camcorder's i.LINK output to HDV (not "DV Conv.")
 and the preview, the sound and all three recording formats follow; MPEG-2 and x264 are made from the HDV
