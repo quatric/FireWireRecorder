@@ -3,6 +3,7 @@
  * control from its DV driver). See fwdv.h. */
 #include "fwdv.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 int fwdv_verbose;
@@ -184,6 +185,7 @@ void avc_parse_medium(const uint8_t *r, int n, fwdv_status_t *st)
 void dv_tx_init(dv_tx_t *t, int pal, uint32_t start_cycle)
 {
     memset(t, 0, sizeof(*t));
+    t->no_syt = getenv("FWDV_SYT") && !strcmp(getenv("FWDV_SYT"), "none");
     t->pal = pal;
     t->npkt = pal ? 300 : 250; /* 6 DIF blocks of 80 bytes each: 1500 or 1800 blocks per frame */
     t->step = pal ? 24576000.0 / 25 / 300 : 24576000.0 * 1001 / 30000 / 250;
@@ -201,11 +203,11 @@ int dv_tx_packet(dv_tx_t *t, uint8_t *out)
         data = now + DV_TX_AHEAD * TICKS_PER_CYCLE >= t->next_pt;
     }
     uint32_t syt = 0xffff;
-    if (data) {
+    if (data && !t->no_syt) {
         uint64_t pt = (uint64_t)t->next_pt;
         syt = (uint32_t)((pt / 3072 & 15) << 12 | pt % 3072);
     }
-    out[0] = 0; /* source node: not needed by the camcorders */
+    out[0] = t->sid & 0x3f; /* source node */
     out[1] = 0x78; /* 120 quadlets per data block */
     out[2] = 0;
     out[3] = t->dbc;

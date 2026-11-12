@@ -72,7 +72,7 @@ struct fwdv {
     uint64_t tx_queued, tx_sent;
     dv_tx_t tx;
     int tx_cur_slot;     /* the queue slot the packetizer is reading, or -1 */
-    int tx_start_cycle, tx_connected;
+    int tx_start_cycle, tx_connected, tx_synced, tx_modify_errors;
     UInt16 tx_sizes[NPKT];
     DCLCallProc tx_calls[NPKT / GROUP];
 #endif
@@ -542,10 +542,29 @@ static void tx_group(DCLCommand *cmd)
         return;
     long g = (long)((DCLCallProc *)cmd)->procData;
     pthread_mutex_lock(&d->tx_lock);
+    if (!d->tx_synced) {
+        /* The DMA started at some moment after we read the cycle timer. Group 0's last packet has just gone
+         * out: shift our timeline so that its cycle is the bus's current one, which makes the time stamps in
+         * the packets we make from here on mean what the camcorder's cycle timer says. */
+        UInt32 ct = 0;
+        if (!(*d->dev)->GetCycleTime(d->dev, &ct)) {
+            int now = (int)(ct >> 12 & 0x1fff);
+            int believed = (int)((d->tx_start_cycle + (g + 1) * GROUP - 1) % 8000);
+            int delta = ((now - believed) % 8000 + 8000) % 8000;
+            d->tx.cycle += (uint64_t)delta;
+            d->tx.next_pt += (double)delta * 3072.0;
+            if (fwdv_verbose)
+                fprintf(stderr, "fwdv: transmit timeline shifted by %d cycles\n", delta);
+        }
+        d->tx_synced = 1;
+    }
     for (int i = 0; i < GROUP; i++) {
         int slot = (int)(g * GROUP + i);
         tx_fill(d, slot);
-        (*d->lport)->ModifyTransferPacketDCLSize(d->lport, &d->xfer[slot], d->tx_sizes[slot]);
+        /* the DCLs were compiled at full size; an empty packet is the same DCL made shorter */
+        IOReturn e = (*d->lport)->ModifyTransferPacketDCLSize(d->lport, &d->xfer[slot], d->tx_sizes[slot]);
+        if (e && !d->tx_modify_errors++ && fwdv_verbose)
+            fprintf(stderr, "fwdv: changing a packet's size failed: %08x\n", e);
     }
     pthread_mutex_unlock(&d->tx_lock);
 }
@@ -567,12 +586,17 @@ static int tx_setup(fwdv_t *d)
     (*d->dev)->AddIsochCallbackDispatcherToRunLoop(d->dev, d->loop);
     d->channel = TXCHAN;
 
-    /* start the DMA on a bus cycle ahead of now, and count our packets from that cycle, so the time
-     * stamps in them line up with the bus's cycle timer */
+    /* count our packets from the bus cycle it is now; tx_group corrects this once the DMA is running */
     UInt32 ct = 0;
     (*d->dev)->GetCycleTime(d->dev, &ct);
-    int start = (int)(((ct >> 12 & 0x1fff) + 1000) % 8000);
+    int start = (int)((ct >> 12 & 0x1fff) % 8000);
+    d->tx_start_cycle = start;
+    d->tx_synced = 0;
+    d->tx_modify_errors = 0;
     dv_tx_init(&d->tx, d->tx_pal, (uint32_t)start);
+    UInt16 node = 0;
+    if (!(*d->dev)->GetLocalNodeID(d->dev, &node))
+        d->tx.sid = (uint8_t)(node & 0x3f);
     d->tx_cur_slot = -1;
 
     pthread_mutex_lock(&d->tx_lock);
@@ -591,7 +615,7 @@ static int tx_setup(fwdv_t *d)
         memset(x, 0, sizeof(*x));
         x->opcode = kDCLSendPacketStartOp;
         x->buffer = d->bufs + (size_t)i * PKTSZ;
-        x->size = d->tx_sizes[i];
+        x->size = TXSZ - 24; /* 488: the largest packet; the DCL can only be made shorter later */
         prev->pNextDCLCommand = (DCLCommand *)x;
         prev = (DCLCommand *)x;
         if ((i + 1) % GROUP == 0) {
@@ -611,8 +635,7 @@ static int tx_setup(fwdv_t *d)
     prev->pNextDCLCommand = (DCLCommand *)&d->jump;
 
     IOVirtualRange br = { (IOVirtualAddress)d->bufs, NPKT * PKTSZ };
-    d->lport = (*d->dev)->CreateLocalIsochPort(d->dev, true, (DCLCommand *)&d->label, kFWDCLCycleEvent, start, 0x1fff,
-                                               NULL, 0, &br, 1,
+    d->lport = (*d->dev)->CreateLocalIsochPort(d->dev, true, (DCLCommand *)&d->label, 0, 0, 0, NULL, 0, &br, 1,
                                                CFUUIDGetUUIDBytes(kIOFireWireLocalIsochPortInterfaceID));
     d->rport = (*d->dev)->CreateRemoteIsochPort(d->dev, false, CFUUIDGetUUIDBytes(kIOFireWireRemoteIsochPortInterfaceID));
     d->chan = (*d->dev)->CreateIsochChannel(d->dev, true, 488, kFWSpeed100MBit,
@@ -632,6 +655,10 @@ static int tx_setup(fwdv_t *d)
             fprintf(stderr, "fwdv: isochronous transmit setup failed: %08x\n", e);
         return FWDV_ERR_IO;
     }
+    /* the empty packets in the first ring are shorter than the DCLs were compiled for */
+    for (int i = 0; i < NPKT; i++)
+        if (d->tx_sizes[i] != TXSZ - 24)
+            (*d->lport)->ModifyTransferPacketDCLSize(d->lport, &d->xfer[i], d->tx_sizes[i]);
     /* tell the camcorder's input plug which channel to listen to, then start sending */
     if ((e = (*d->avc)->makeP2PInputConnection(d->avc, 0, TXCHAN))) {
         if (fwdv_verbose)
@@ -645,7 +672,7 @@ static int tx_setup(fwdv_t *d)
         return FWDV_ERR_IO;
     }
     if (fwdv_verbose)
-        fprintf(stderr, "fwdv: sending on channel %d from cycle %d\n", TXCHAN, start);
+        fprintf(stderr, "fwdv: sending on channel %d as node %d from cycle %d\n", TXCHAN, d->tx.sid, start);
     return FWDV_OK;
 }
 

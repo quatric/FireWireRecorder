@@ -112,8 +112,8 @@ void avc_parse_medium(const uint8_t *r, int n, fwdv_status_t *st);
 
 #define DV_TX_AHEAD 4 /* cycles between sending a packet and the time stamp in it */
 typedef struct {
-    int pal, idx, npkt;
-    uint8_t dbc;
+    int pal, idx, npkt, no_syt; /* no_syt: send SYT = 0xFFFF (no time stamps) */
+    uint8_t dbc, sid;           /* sid: our node number, the packets' source */
     uint64_t cycle;       /* the bus cycle the next packet goes out in (counted from the start) */
     double next_pt, step; /* presentation time of the next data packet, in 24.576 MHz ticks */
     const uint8_t *frame; /* the frame being sent, or NULL (then the packets are empty) */
