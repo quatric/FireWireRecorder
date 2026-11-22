@@ -175,6 +175,13 @@ static int pot(int v)
     [[self openGLContext] makeCurrentContext];
     [self drawPicture];
 }
+
+- (void)rightMouseDown:(NSEvent *)e
+{
+    (void)e;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"rightClickSnapshot"])
+        [NSApp sendAction:@selector(snapshot:) to:[NSApp delegate] from:self];
+}
 @end
 
 /* ---- level meters (NSLevelIndicator needs 10.4) ---- */
@@ -437,6 +444,8 @@ static void rec_done(void *user, int ok, const char *path);
     NSMenuItem *viewItem = [[[NSMenuItem alloc] initWithTitle:@"View" action:NULL keyEquivalent:@""] autorelease];
     NSMenu *view = [[[NSMenu alloc] initWithTitle:@"View"] autorelease];
     [[view addItemWithTitle:@"Show Preview" action:@selector(togglePreview:) keyEquivalent:@"e"] setTarget:self];
+    [[view addItemWithTitle:@"Right-Click Saves Snapshot" action:@selector(toggleRightClickSnapshot:) keyEquivalent:@""]
+        setTarget:self];
     [viewItem setSubmenu:view];
     [bar addItem:viewItem];
 
@@ -562,7 +571,8 @@ static void rec_done(void *user, int ok, const char *path);
     NSUserDefaults *ud = [self ud];
     [ud registerDefaults:[NSDictionary dictionaryWithObjectsAndKeys:
         [NSNumber numberWithInt:0], @"format", [NSNumber numberWithBool:YES], @"autoStop",
-        [NSNumber numberWithBool:YES], @"preview", [NSNumber numberWithBool:YES], @"monitor", nil]];
+        [NSNumber numberWithBool:YES], @"preview", [NSNumber numberWithBool:YES], @"monitor",
+        [NSNumber numberWithBool:YES], @"rightClickSnapshot", nil]];
 
     /* Cocoa must know threads exist before the engine's threads call back into it */
     [NSThread detachNewThreadSelector:@selector(noop:) toTarget:self withObject:nil];
@@ -722,6 +732,8 @@ static void rec_done(void *user, int ok, const char *path);
         return !app_is_recording(g_app);
     if ([item action] == @selector(snapshot:))
         return app_state(g_app) == APP_STREAMING && app_preview(g_app);
+    if ([item action] == @selector(toggleRightClickSnapshot:))
+        [item setState:[[self ud] boolForKey:@"rightClickSnapshot"] ? NSOnState : NSOffState];
     if ([item action] == @selector(togglePreview:))
         [item setState:app_preview(g_app) ? NSOnState : NSOffState];
     if ([item action] == @selector(tapeButton:))
@@ -793,6 +805,12 @@ static void rec_done(void *user, int ok, const char *path)
                                                                     [NSString stringWithUTF8String:path], @"path", nil];
     [(Controller *)user performSelectorOnMainThread:@selector(recordingDone:) withObject:info waitUntilDone:NO];
     [pool release];
+}
+
+- (void)toggleRightClickSnapshot:(id)sender
+{
+    (void)sender;
+    [[self ud] setBool:![[self ud] boolForKey:@"rightClickSnapshot"] forKey:@"rightClickSnapshot"];
 }
 
 - (void)snapshot:(id)sender

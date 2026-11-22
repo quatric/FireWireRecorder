@@ -437,6 +437,12 @@ static NSPopUpButton *make_popup(const char *const *names, int n, id target, SEL
     if (e.clickCount == 2)
         [self.window toggleFullScreen:nil];
 }
+- (void)rightMouseDown:(NSEvent *)e
+{
+    (void)e;
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"rightClickSnapshot"])
+        [NSApp sendAction:@selector(snapshot:) to:NSApp.delegate from:self];
+}
 @end
 
 /* ---- app ---- */
@@ -481,7 +487,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
 - (void)applicationDidFinishLaunching:(NSNotification *)note
 {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-    [ud registerDefaults:@{ @"format" : @0, @"autoStop" : @YES, @"preview" : @YES, @"monitor" : @YES }];
+    [ud registerDefaults:@{ @"format" : @0, @"autoStop" : @YES, @"preview" : @YES, @"monitor" : @YES, @"rightClickSnapshot" : @YES }];
     NSString *folder = [ud stringForKey:@"folder"];
     _folder = folder ? [NSURL fileURLWithPath:folder]
                      : [NSFileManager.defaultManager URLsForDirectory:NSMoviesDirectory
@@ -751,6 +757,7 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     [bar addItem:viewItem];
     NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
     [view addItemWithTitle:@"Show Preview" action:@selector(togglePreview:) keyEquivalent:@"e"];
+    [view addItemWithTitle:@"Right-Click Saves Snapshot" action:@selector(toggleRightClickSnapshot:) keyEquivalent:@""];
     [view addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"]
         .keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
     viewItem.submenu = view;
@@ -870,6 +877,12 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     }
 }
 
+- (void)toggleRightClickSnapshot:(id)sender
+{
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud setBool:![ud boolForKey:@"rightClickSnapshot"] forKey:@"rightClickSnapshot"];
+}
+
 - (void)togglePreview:(id)sender
 {
     _previewCheck.state = _previewCheck.state == NSControlStateValueOn ? NSControlStateValueOff : NSControlStateValueOn;
@@ -915,6 +928,8 @@ static const fwdv_cmd_t tape_cmds[TAPE_BUTTONS] = { FWDV_REWIND, FWDV_PLAY, FWDV
     }
     if (item.action == @selector(snapshot:))
         return app_state(g_app) == APP_STREAMING && app_preview(g_app);
+    if (item.action == @selector(toggleRightClickSnapshot:))
+        item.state = [NSUserDefaults.standardUserDefaults boolForKey:@"rightClickSnapshot"] ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(togglePreview:))
         item.state = app_preview(g_app) ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(tapeButton:))

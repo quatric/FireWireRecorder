@@ -30,7 +30,7 @@ enum {
     ID_TIMECODE = 110, ID_TAPESTATE, ID_FORMAT, ID_AUTOSTOP, ID_PREVIEW, ID_FOLDER, ID_RECORD, ID_MONITOR, ID_TIME,
     ID_STATUS, ID_METER_L, ID_METER_R, ID_LBL_FORMAT, ID_LBL_SAVE, ID_LBL_L, ID_LBL_R, ID_LBL_STOP, ID_STOPAFTER,
     IDM_RECORD = 200, IDM_SNAPSHOT, IDM_CHOOSE_FOLDER, IDM_OPEN_FOLDER, IDM_EXIT, IDM_FULLSCREEN, IDM_ESCAPE,
-    IDM_PREVIEW,
+    IDM_PREVIEW, IDM_RCLICK_SNAP,
     IDM_TAPE = 220, /* IDM_TAPE + TAPE_* */
     TIMER_FRAME = 1, TIMER_UI = 2,
     WM_APP_RECDONE = WM_APP + 1,
@@ -133,6 +133,10 @@ static LRESULT CALLBACK preview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 1;
     case WM_LBUTTONDBLCLK:
         SendMessageW(G.wnd, WM_COMMAND, IDM_FULLSCREEN, 0);
+        return 0;
+    case WM_RBUTTONUP:
+        if (app_setting_int("right_click_snapshot", 1))
+            SendMessageW(G.wnd, WM_COMMAND, IDM_SNAPSHOT, 0);
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -338,6 +342,8 @@ static void build_menu(void)
     AppendMenuW(tape, MF_STRING, IDM_TAPE + TAPE_FF, L"&Fast Forward\tCtrl+Right");
     AppendMenuW(view, MF_STRING, IDM_PREVIEW, L"Show &Preview\tCtrl+E");
     AppendMenuW(view, MF_STRING, IDM_FULLSCREEN, L"&Full Screen\tF11");
+    AppendMenuW(view, MF_STRING | (app_setting_int("right_click_snapshot", 1) ? MF_CHECKED : 0), IDM_RCLICK_SNAP,
+                L"&Right-Click Saves Snapshot");
     G.menu = CreateMenu();
     AppendMenuW(G.menu, MF_POPUP, (UINT_PTR)file, L"&File");
     AppendMenuW(G.menu, MF_POPUP, (UINT_PTR)tape, L"&Tape");
@@ -674,6 +680,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         case ID_PREVIEW:
             set_preview(checked(G.previewchk));
             return 0;
+        case IDM_RCLICK_SNAP: {
+            int on = !app_setting_int("right_click_snapshot", 1);
+            app_set_setting_int("right_click_snapshot", on);
+            CheckMenuItem(G.menu, IDM_RCLICK_SNAP, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
+            return 0;
+        }
         case IDM_PREVIEW:
             set_preview(!app_preview(G.app));
             return 0;
